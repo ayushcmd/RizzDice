@@ -1,6 +1,65 @@
 import type { Player, Token } from '../types/ludo';
 import { SAFE_SPOTS, COLOR_CONFIGS } from './boardData';
 
+export interface IntermediateStep {
+  block: number;
+  numberOfSteps: number;
+  currWinnerBlock: number;
+  isHomeCenter: boolean;
+}
+
+/**
+ * Computes the exact array of intermediate squares a token traverses step-by-step
+ */
+export function getStepSequence(token: Token, diceValue: number): IntermediateStep[] {
+  if (!token.isAlive || token.hasCompleted) return [];
+
+  const config = COLOR_CONFIGS[token.color];
+  const totalSteps = token.numberOfSteps + diceValue;
+  if (totalSteps > 57) return [];
+
+  const sequence: IntermediateStep[] = [];
+  let curr = token.currBlock;
+  let winnerIdx = token.currWinnerBlock;
+  let inWinnerZone = token.currWinnerBlock > 0;
+  let steps = token.numberOfSteps;
+
+  for (let s = 0; s < diceValue; s++) {
+    steps++;
+    if (steps === 57) {
+      sequence.push({
+        block: 999,
+        numberOfSteps: 57,
+        currWinnerBlock: winnerIdx,
+        isHomeCenter: true,
+      });
+      break;
+    }
+
+    if (inWinnerZone) {
+      curr = config.winnerBlocks[winnerIdx];
+      winnerIdx++;
+    } else {
+      if (curr === config.endPosition) {
+        inWinnerZone = true;
+        curr = config.winnerBlocks[winnerIdx];
+        winnerIdx++;
+      } else {
+        curr = curr >= 51 ? 0 : curr + 1;
+      }
+    }
+
+    sequence.push({
+      block: curr,
+      numberOfSteps: steps,
+      currWinnerBlock: winnerIdx,
+      isHomeCenter: false,
+    });
+  }
+
+  return sequence;
+}
+
 /**
  * Predicts the resulting block for a token given a dice roll
  */

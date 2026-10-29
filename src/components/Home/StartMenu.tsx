@@ -177,7 +177,7 @@ export const StartMenu: React.FC<StartMenuProps> = ({
             <div className="w-20 h-20 sm:w-22 sm:h-22 rounded-3xl bg-gradient-to-tr from-[#E9BC42] via-yellow-200 to-[#E9BC42] p-0.5 shadow-[0_8px_30px_rgba(233,188,66,0.3)]">
               <div className="w-full h-full rounded-[22px] bg-[#161616] flex items-center justify-center overflow-hidden">
                 <img
-                  src="/images/dice6.png"
+                  src="/images/icon.png"
                   alt="Rizz Dice"
                   className="w-13 h-13 sm:w-15 sm:h-15 object-contain drop-shadow"
                 />

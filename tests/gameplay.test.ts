@@ -325,12 +325,88 @@ import('../src/utils/voiceManager').then(({ AVAILABLE_AUDIO_CLIPS, SYSTEM_DEFAUL
     storageManager.clearActiveSession();
     assert(storageManager.getActiveSession() === null, 'Cleared session returns null');
 
-    console.log(`\n============================`);
-    console.log(`SUMMARY: ${passed} Passed, ${failed} Failed`);
-    console.log(`============================\n`);
+    // 10. Step-by-Step Movement Sequence Tests
+    console.log('\n[10] Step-by-Step Movement Sequence Tests');
+    import('../src/utils/botAI').then(({ getStepSequence }) => {
+      // Test A: Normal perimeter movement for rolls 1 through 6
+      const testToken: Token = {
+        id: 0,
+        color: 'red',
+        playerIndex: 0,
+        isAlive: true,
+        currBlock: 39,
+        numberOfSteps: 0,
+        currWinnerBlock: 0,
+        hasCompleted: false,
+        yardSlot: 0,
+      };
 
-    if (failed > 0) {
-      process.exit(1);
-    }
+      for (let roll = 1; roll <= 6; roll++) {
+        const seq = getStepSequence(testToken, roll);
+        assert(seq.length === roll, `Roll of ${roll} generates exactly ${roll} sequential steps`);
+        assert(seq[0].block === 40, `First step from block 39 is block 40`);
+        assert(seq[seq.length - 1].numberOfSteps === roll, `Last step cumulative steps equals ${roll}`);
+      }
+
+      // Test B: Wraparound perimeter test (block 51 -> block 0)
+      const wrapToken: Token = {
+        ...testToken,
+        currBlock: 50,
+        numberOfSteps: 11,
+      };
+      const wrapSeq = getStepSequence(wrapToken, 3);
+      assert(wrapSeq.length === 3, 'Wraparound generates 3 steps');
+      assert(wrapSeq[0].block === 51, 'First step reaches cell 51');
+      assert(wrapSeq[1].block === 0, 'Second step wraps around to cell 0');
+      assert(wrapSeq[2].block === 1, 'Third step reaches cell 1');
+
+      // Test C: Entering home column (Red endPosition = 37 -> winnerBlocks[0] = 70)
+      const homeEntryToken: Token = {
+        ...testToken,
+        currBlock: 37,
+        numberOfSteps: 50,
+      };
+      const homeEntrySeq = getStepSequence(homeEntryToken, 3);
+      assert(homeEntrySeq.length === 3, 'Home stretch entry generates 3 steps');
+      assert(homeEntrySeq[0].block === 70, 'First step enters red home column (block 70)');
+      assert(homeEntrySeq[1].block === 71, 'Second step moves along home column (block 71)');
+      assert(homeEntrySeq[2].block === 72, 'Third step moves along home column (block 72)');
+
+      // Test D: Reaching exact Home Center (step 57)
+      const finalApproachToken: Token = {
+        ...testToken,
+        currBlock: 74,
+        numberOfSteps: 55,
+        currWinnerBlock: 5,
+      };
+      const finalSeq = getStepSequence(finalApproachToken, 2);
+      assert(finalSeq.length === 2, 'Final approach generates 2 steps');
+      assert(finalSeq[0].block === 75, 'Step 56 reaches cell 75');
+      assert(finalSeq[1].block === 999 && finalSeq[1].isHomeCenter === true, 'Step 57 reaches home center (block 999)');
+
+      // 11. Favicon and Application Icon Metadata
+      console.log('\n[11] Application Icon and Favicon Metadata');
+      import('node:fs').then((fs) => {
+        assert(fs.existsSync('public/images/icon.png'), 'public/images/icon.png asset exists');
+        const iconStat = fs.statSync('public/images/icon.png');
+        assert(iconStat.size > 0, `icon.png is non-empty (${iconStat.size} bytes)`);
+
+        const indexHtml = fs.readFileSync('index.html', 'utf-8');
+        assert(indexHtml.includes('/images/icon.png'), 'index.html references /images/icon.png for favicon');
+        assert(indexHtml.includes('/site.webmanifest'), 'index.html references /site.webmanifest');
+
+        assert(fs.existsSync('public/site.webmanifest'), 'public/site.webmanifest exists');
+        const manifest = JSON.parse(fs.readFileSync('public/site.webmanifest', 'utf-8'));
+        assert(manifest.icons && manifest.icons.some((i: { src: string }) => i.src === '/images/icon.png'), 'site.webmanifest declares /images/icon.png');
+
+        console.log(`\n============================`);
+        console.log(`SUMMARY: ${passed} Passed, ${failed} Failed`);
+        console.log(`============================\n`);
+
+        if (failed > 0) {
+          process.exit(1);
+        }
+      });
+    });
   });
 });

@@ -12,7 +12,7 @@ import { COLOR_CONFIGS, SAFE_SPOTS } from './utils/boardData';
 import { sounds } from './utils/soundManager';
 import { voices } from './utils/voiceManager';
 import { storageManager } from './utils/storageManager';
-import { chooseBotMove, canTokenMove } from './utils/botAI';
+import { chooseBotMove, canTokenMove, getStepSequence } from './utils/botAI';
 import { StartMenu } from './components/Home/StartMenu';
 import { LudoBoard } from './components/Board/LudoBoard';
 import { DicePad } from './components/Controls/DicePad';
@@ -331,7 +331,7 @@ export function App() {
     isTurnProcessingRef.current = false;
   }, []);
 
-  // Execute a token move
+  // Execute a token move step-by-step
   const executeTokenMove = useCallback(
     (token: Token, rolledValue: number) => {
       isTurnProcessingRef.current = true;
@@ -339,14 +339,12 @@ export function App() {
 
       const config = COLOR_CONFIGS[token.color];
       const currentList = playersRef.current;
-      let gainedExtraTurn = false;
 
-      // Case A: Spawning token from base yard on 6
+      // Case A: Spawning token from base yard on 6 (smooth single step into starting square)
       if (!token.isAlive && rolledValue === 6) {
         sounds.play('step');
         voices.handleGameEvent('ROLL_SIX', token.color);
         triggerReactionBadge(token.color, '🎲', 'Spawned!');
-        gainedExtraTurn = true;
 
         const updated = currentList.map((p) => {
           if (p.id !== token.playerIndex) return p;
@@ -366,6 +364,7 @@ export function App() {
         });
 
         setPlayers(updated);
+        playersRef.current = updated;
 
         setTimeout(() => {
           setHasExtraChance(true);
@@ -375,175 +374,166 @@ export function App() {
         return;
       }
 
-      // Case B: Advancing an alive token
-      const newSteps = token.numberOfSteps + rolledValue;
+      // Case B: Advancing an alive token step-by-step
+      const stepSequence = getStepSequence(token, rolledValue);
+      if (stepSequence.length === 0) {
+        isTurnProcessingRef.current = false;
+        return;
+      }
 
-      // Reached Home center (57 steps)
-      if (newSteps === 57) {
-        sounds.play('panta');
-        voices.handleGameEvent('HOME', token.color);
-        triggerReactionBadge(token.color, '🏁', 'Home!');
+      const stepDelay = 185; // 185ms per square: smooth, readable, and responsive
+      let stepIndex = 0;
 
-        let completedWinnerPlayer: Player | null = null;
+      const runNextStep = () => {
+        if (stepIndex < stepSequence.length) {
+          const step = stepSequence[stepIndex];
+          sounds.playStep();
 
-        const updated = currentList.map((p) => {
-          if (p.id !== token.playerIndex) return p;
-          const updatedTokens = p.tokens.map((t) => {
-            if (t.id !== token.id) return t;
-            return {
-              ...t,
-              currBlock: 999,
-              numberOfSteps: 57,
-              hasCompleted: true,
-            };
+          setPlayers((prevPlayers) => {
+            const updated = prevPlayers.map((p) => {
+              if (p.id !== token.playerIndex) return p;
+              return {
+                ...p,
+                tokens: p.tokens.map((t) => {
+                  if (t.id !== token.id) return t;
+                  return {
+                    ...t,
+                    currBlock: step.block,
+                    numberOfSteps: step.numberOfSteps,
+                    currWinnerBlock: step.currWinnerBlock,
+                    hasCompleted: step.isHomeCenter,
+                  };
+                }),
+              };
+            });
+            playersRef.current = updated;
+            return updated;
           });
 
-          const completedCount = updatedTokens.filter((t) => t.hasCompleted).length;
-          const hasWon = completedCount === 4;
-
-          if (hasWon) {
-            completedWinnerPlayer = { ...p, tokens: updatedTokens, hasWon: true };
-          }
-
-          return {
-            ...p,
-            tokens: updatedTokens,
-            hasWon,
-          };
-        });
-
-        setPlayers(updated);
-
-        if (completedWinnerPlayer) {
-          const updatedWinnerRecord = {
-            player: completedWinnerPlayer,
-            rank: winners.length + 1,
-          };
-          const nextWinners = [...winners, updatedWinnerRecord];
-          setWinners(nextWinners);
-
-          const remainingActive = updated.filter((p) => !p.hasWon);
-          if (remainingActive.length <= 1) {
-            // Match is over!
-            setTimeout(() => {
-              storageManager.clearActiveSession();
-              setActiveSession(null);
-              setGameState('WINNER');
-            }, 800);
-            return;
-          }
-
-          // Player won, do not award extra turn to finished player
-          setTimeout(() => {
-            switchPlayers(updated);
-          }, 450);
+          stepIndex++;
+          setTimeout(runNextStep, stepDelay);
           return;
         }
 
-        // Token reached home but player hasn't completed all 4 tokens -> extra roll
-        setTimeout(() => {
-          setHasExtraChance(true);
-          setCanRoll(true);
-          isTurnProcessingRef.current = false;
-        }, 350);
-        return;
-      }
+        // All intermediate steps completed! Now evaluate final landing square rules
+        const finalStep = stepSequence[stepSequence.length - 1];
+        const latestPlayers = playersRef.current;
+        let gainedExtraTurn = false;
 
-      // Standard move calculation along outer track and home stretch
-      let destBlock = token.currBlock;
-      let winnerIdx = token.currWinnerBlock;
-      let inWinner = token.currWinnerBlock > 0;
+        // Sub-case 1: Reached Home Center (57 steps)
+        if (finalStep.isHomeCenter) {
+          sounds.play('panta');
+          voices.handleGameEvent('HOME', token.color);
+          triggerReactionBadge(token.color, '🏁', 'Home!');
 
-      for (let s = 0; s < rolledValue; s++) {
-        if (inWinner) {
-          destBlock = config.winnerBlocks[winnerIdx];
-          winnerIdx++;
-        } else {
-          if (destBlock === config.endPosition) {
-            inWinner = true;
-            destBlock = config.winnerBlocks[winnerIdx];
-            winnerIdx++;
-          } else {
-            destBlock = destBlock >= 51 ? 0 : destBlock + 1;
-          }
-        }
-      }
+          const activeP = latestPlayers.find((p) => p.id === token.playerIndex);
+          const completedCount = activeP?.tokens.filter((t) => t.hasCompleted).length || 0;
+          const hasWon = completedCount === 4;
 
-      sounds.playStep();
+          if (hasWon && activeP) {
+            const completedWinnerPlayer = { ...activeP, hasWon: true };
+            const updatedWithWin = latestPlayers.map((p) =>
+              p.id === token.playerIndex ? completedWinnerPlayer : p
+            );
+            setPlayers(updatedWithWin);
+            playersRef.current = updatedWithWin;
 
-      // Check collision/capture on target cell
-      let capturedEnemy = false;
-      const targetIsSafe = SAFE_SPOTS.has(destBlock);
-
-      const updated = currentList.map((p) => {
-        // If other player has token on same non-safe block -> capture!
-        if (p.id !== token.playerIndex && !p.hasWon && !targetIsSafe) {
-          const hasVictim = p.tokens.some((t) => t.isAlive && t.currBlock === destBlock);
-          if (hasVictim) {
-            capturedEnemy = true;
-            return {
-              ...p,
-              tokens: p.tokens.map((t) => {
-                if (t.isAlive && t.currBlock === destBlock) {
-                  return {
-                    ...t,
-                    isAlive: false,
-                    currBlock: -1,
-                    numberOfSteps: 0,
-                    currWinnerBlock: 0,
-                  };
-                }
-                return t;
-              }),
+            const updatedWinnerRecord = {
+              player: completedWinnerPlayer,
+              rank: winners.length + 1,
             };
+            const nextWinners = [...winners, updatedWinnerRecord];
+            setWinners(nextWinners);
+
+            const remainingActive = updatedWithWin.filter((p) => !p.hasWon);
+            if (remainingActive.length <= 1) {
+              // Match is over!
+              setTimeout(() => {
+                storageManager.clearActiveSession();
+                setActiveSession(null);
+                setGameState('WINNER');
+              }, 800);
+              return;
+            }
+
+            // Player won, rotate turn to next active player without extra turn
+            setTimeout(() => {
+              switchPlayers(updatedWithWin);
+            }, 450);
+            return;
           }
+
+          // Token reached home but player hasn't completed all 4 tokens -> extra roll!
+          setTimeout(() => {
+            setHasExtraChance(true);
+            setCanRoll(true);
+            isTurnProcessingRef.current = false;
+          }, 350);
+          return;
         }
 
-        // Update the moving player's token
-        if (p.id === token.playerIndex) {
-          return {
-            ...p,
-            tokens: p.tokens.map((t) => {
-              if (t.id !== token.id) return t;
+        // Sub-case 2: Landed on perimeter or home stretch square
+        const destBlock = finalStep.block;
+        const targetIsSafe = SAFE_SPOTS.has(destBlock);
+        let capturedEnemy = false;
+
+        const updatedWithCapture = latestPlayers.map((p) => {
+          // If another player has token on same non-safe block -> capture!
+          if (p.id !== token.playerIndex && !p.hasWon && !targetIsSafe) {
+            const hasVictim = p.tokens.some((t) => t.isAlive && t.currBlock === destBlock);
+            if (hasVictim) {
+              capturedEnemy = true;
               return {
-                ...t,
-                currBlock: destBlock,
-                numberOfSteps: newSteps,
-                currWinnerBlock: winnerIdx,
+                ...p,
+                tokens: p.tokens.map((t) => {
+                  if (t.isAlive && t.currBlock === destBlock) {
+                    return {
+                      ...t,
+                      isAlive: false,
+                      currBlock: -1,
+                      numberOfSteps: 0,
+                      currWinnerBlock: 0,
+                    };
+                  }
+                  return t;
+                }),
               };
-            }),
-          };
+            }
+          }
+          return p;
+        });
+
+        setPlayers(updatedWithCapture);
+        playersRef.current = updatedWithCapture;
+
+        // Sound & Voice triggers
+        if (capturedEnemy) {
+          sounds.play('death');
+          voices.handleGameEvent('CAPTURE', token.color);
+          triggerReactionBadge(token.color, '⚔️', 'Captured!');
+          gainedExtraTurn = true;
+        } else if (targetIsSafe) {
+          sounds.play('safe');
+          triggerReactionBadge(token.color, '🛡️', 'Safe!');
         }
 
-        return p;
-      });
-
-      setPlayers(updated);
-
-      // Sound & Voice triggers
-      if (capturedEnemy) {
-        sounds.play('death');
-        voices.handleGameEvent('CAPTURE', token.color);
-        triggerReactionBadge(token.color, '⚔️', 'Captured!');
-        gainedExtraTurn = true;
-      } else if (targetIsSafe) {
-        sounds.play('safe');
-        triggerReactionBadge(token.color, '🛡️', 'Safe!');
-      }
-
-      if (rolledValue === 6) {
-        gainedExtraTurn = true;
-      }
-
-      setTimeout(() => {
-        if (gainedExtraTurn) {
-          setHasExtraChance(true);
-          setCanRoll(true);
-          isTurnProcessingRef.current = false;
-        } else {
-          switchPlayers(updated);
+        if (rolledValue === 6) {
+          gainedExtraTurn = true;
         }
-      }, 400);
+
+        setTimeout(() => {
+          if (gainedExtraTurn) {
+            setHasExtraChance(true);
+            setCanRoll(true);
+            isTurnProcessingRef.current = false;
+          } else {
+            switchPlayers(updatedWithCapture);
+          }
+        }, 350);
+      };
+
+      // Start sequential movement
+      runNextStep();
     },
     [switchPlayers, winners, triggerReactionBadge]
   );
@@ -724,7 +714,7 @@ export function App() {
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-xl bg-white/[0.06] border border-[#E9BC42]/40 flex items-center justify-center shadow-md">
             <img
-              src="/images/dice6.png"
+              src="/images/icon.png"
               alt="Logo"
               className="w-5 h-5 object-contain"
             />

@@ -1,0 +1,16 @@
+{
+  "name": "Rizz Dice — Ludo King Redefined",
+  "short_name": "Rizz Dice",
+  "description": "Ludo King Redefined with Glassmorphism UI & Soundboard",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "icons": [
+    {
+      "src": "/images/icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

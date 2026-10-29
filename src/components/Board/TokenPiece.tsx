@@ -37,8 +37,9 @@ export const TokenPiece: React.FC<TokenPieceProps> = ({
         top: `${finalY}%`,
         transform: `translate(-50%, -60%) scale(${scale})`,
         zIndex: isSelectable ? 40 : token.isAlive ? 20 + (token.currBlock % 10) : 10,
+        transition: 'left 175ms cubic-bezier(0.25, 1, 0.5, 1), top 175ms cubic-bezier(0.25, 1, 0.5, 1), transform 175ms ease-out',
       }}
-      className={`absolute cursor-pointer transition-all duration-200 select-none ${
+      className={`absolute cursor-pointer select-none ${
         isSelectable ? 'animate-bounce' : ''
       }`}
     >
