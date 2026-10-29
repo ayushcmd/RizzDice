@@ -72,21 +72,24 @@ export function setupSocketHandlers(io: Server) {
         console.log(`[Grace Period] Player ${playerId} successfully reconnected within grace period!`);
       }
 
+      // Check if this player was inside an active room or match
+      const existingPresence = await redisMultiplayer.getPlayerPresence(playerId);
+      const roomCode = existingPresence?.currentRoomCode;
+
       const onlinePlayer: OnlinePlayer = {
         id: playerId,
         name: playerName,
-        status: 'AVAILABLE',
-        connectedAt: Date.now(),
+        status: roomCode ? 'IN_GAME' : 'AVAILABLE',
+        currentRoomCode: roomCode,
+        connectedAt: existingPresence?.connectedAt || Date.now(),
       };
 
       await redisMultiplayer.registerPresence(onlinePlayer);
       socket.emit('player:ready', { player: onlinePlayer });
       await broadcastLobbyUpdate();
 
-      // Check if this player was inside an active room or match
-      const presence = await redisMultiplayer.getPlayerPresence(playerId);
-      if (presence?.currentRoomCode) {
-        const room = await redisMultiplayer.getRoom(presence.currentRoomCode);
+      if (roomCode) {
+        const room = await redisMultiplayer.getRoom(roomCode);
         if (room) {
           socket.join(`room:${room.code}`);
           // Mark seat as connected
@@ -303,6 +306,13 @@ export function setupSocketHandlers(io: Server) {
     // 4. PRIVATE ROOMS & LOBBY MANAGEMENT
     // -------------------------------------------------------------
     socket.on('room:create', async (data: { maxPlayers: 2 | 3 | 4 }) => {
+      if (!redisMultiplayer.isReady()) {
+        socket.emit('room:error', {
+          message: 'Multiplayer service is currently connecting or unavailable. Please try again shortly.',
+        });
+        return;
+      }
+
       const playerId = socketToPlayerMap.get(socket.id);
       if (!playerId) return;
 
@@ -461,6 +471,13 @@ export function setupSocketHandlers(io: Server) {
     // 5. START GAME & AUTHORITATIVE GAMEPLAY
     // -------------------------------------------------------------
     socket.on('room:start', async (data: { roomCode: string }) => {
+      if (!redisMultiplayer.isReady()) {
+        socket.emit('room:error', {
+          message: 'Multiplayer service is currently connecting or unavailable. Please try again shortly.',
+        });
+        return;
+      }
+
       const playerId = socketToPlayerMap.get(socket.id);
       if (!playerId) return;
 
@@ -517,6 +534,7 @@ export function setupSocketHandlers(io: Server) {
       try {
         const result = LudoEngine.rollDice(match, seatIndex);
         await redisMultiplayer.saveMatch(match.roomCode, match);
+        await redisMultiplayer.touchRoom(match.roomCode);
 
         io.to(`room:${match.roomCode}`).emit('game:dice_rolled', {
           diceValue: result.diceValue,
@@ -550,6 +568,7 @@ export function setupSocketHandlers(io: Server) {
       try {
         const result = LudoEngine.moveToken(match, seatIndex, data.tokenId);
         await redisMultiplayer.saveMatch(match.roomCode, match);
+        await redisMultiplayer.touchRoom(match.roomCode);
 
         io.to(`room:${match.roomCode}`).emit('game:token_moved', {
           tokenId: data.tokenId,

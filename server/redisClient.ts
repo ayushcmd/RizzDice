@@ -1,4 +1,9 @@
-import { Redis } from 'ioredis';
+import dotenv from 'dotenv';
+// Load .env.local first (user secrets), then fallback to .env
+dotenv.config({ path: '.env.local' });
+dotenv.config();
+
+import { Redis, type RedisOptions } from 'ioredis';
 import type {
   OnlinePlayer,
   PlayerPresenceStatus,
@@ -21,7 +26,33 @@ export interface IRedisStorage {
   quit(): Promise<void>;
 }
 
-// In-Memory Fallback if Redis is offline or not installed
+export interface RedisHealth {
+  status: 'connected' | 'connecting' | 'degraded' | 'disconnected';
+  isRealRedis: boolean;
+  isMemoryFallback: boolean;
+  maskedUrl: string;
+  provider: string;
+  pingMs?: number;
+  lastError?: string | null;
+}
+
+/**
+ * Safely masks credentials from Redis URL to prevent leaking in logs
+ */
+export function maskRedisUrl(rawUrl?: string): string {
+  if (!rawUrl) return '(undefined)';
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.password) {
+      parsed.password = '***';
+    }
+    return parsed.toString();
+  } catch {
+    return rawUrl.startsWith('rediss://') ? 'rediss://***:***@hidden' : 'redis://***:***@hidden';
+  }
+}
+
+// In-Memory Fallback Store (for local offline development/testing only)
 export class MemoryRedisStore implements IRedisStorage {
   private kv = new Map<string, { value: string; expiresAt: number | null }>();
   private sets = new Map<string, { members: Set<string>; expiresAt: number | null }>();
@@ -153,69 +184,194 @@ export class MemoryRedisStore implements IRedisStorage {
   }
 }
 
-// Global client setup
+// ----------------------------------------------------------------------
+// Connection State Management
+// ----------------------------------------------------------------------
+const isProduction = process.env.NODE_ENV === 'production';
+const rawRedisUrl = process.env.REDIS_URL || (isProduction ? '' : 'redis://localhost:6379');
+const maskedUrl = maskRedisUrl(rawRedisUrl);
+
 let rawClient: IRedisStorage;
 let isRealRedis = false;
+let connectionStatus: 'connected' | 'connecting' | 'degraded' | 'disconnected' = 'connecting';
+let lastErrorMessage: string | null = null;
+let activeRedisInstance: Redis | null = null;
 
-const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-
-try {
-  const redisInstance = new Redis(redisUrl, {
-    maxRetriesPerRequest: 1,
-    retryStrategy: (times) => {
-      if (times > 3) return null; // stop reconnecting if down
-      return Math.min(times * 100, 1000);
-    },
+if (!rawRedisUrl) {
+  if (isProduction) {
+    connectionStatus = 'disconnected';
+    lastErrorMessage = 'REDIS_URL environment variable is missing in production.';
+    console.error(`[Redis Error] ${lastErrorMessage}`);
+    // Dummy failing storage in production when REDIS_URL is omitted
+    rawClient = {
+      get: async () => null,
+      set: async () => null,
+      del: async () => 0,
+      sadd: async () => 0,
+      srem: async () => 0,
+      smembers: async () => [],
+      sismember: async () => 0,
+      expire: async () => 0,
+      keys: async () => [],
+      ping: async () => { throw new Error('Redis not configured in production'); },
+      quit: async () => {},
+    };
+  } else {
+    console.warn('[Redis Dev] No REDIS_URL provided. Initializing in-memory fallback for local development.');
+    connectionStatus = 'degraded';
+    rawClient = new MemoryRedisStore();
+  }
+} else {
+  const isTls = rawRedisUrl.startsWith('rediss://');
+  const redisOptions: RedisOptions = {
+    maxRetriesPerRequest: 3,
+    enableReadyCheck: true,
     lazyConnect: true,
-  });
+    connectTimeout: 8000,
+    retryStrategy: (times) => {
+      if (times > 8) {
+        if (isProduction) {
+          connectionStatus = 'disconnected';
+        }
+        return null;
+      }
+      return Math.min(times * 250, 2000);
+    },
+    // TLS configuration for Upstash Redis (rediss://)
+    ...(isTls
+      ? {
+          tls: {
+            rejectUnauthorized: false, // ensures secure connection without client CA friction
+          },
+        }
+      : {}),
+  };
 
-  redisInstance.on('error', (err) => {
-    if (!isRealRedis) return;
-    console.warn('[Redis] Connection warning, switching to in-memory fallback:', err.message);
-  });
+  try {
+    const redisInstance = new Redis(rawRedisUrl, redisOptions);
+    activeRedisInstance = redisInstance;
 
-  // Attempt async connect; if it fails, fallback kicks in
-  redisInstance
-    .connect()
-    .then(() => {
+    redisInstance.on('ready', () => {
       isRealRedis = true;
-      console.log('[Redis] Connected successfully to Redis server at', redisUrl);
-    })
-    .catch((err) => {
-      console.warn('[Redis] Unable to connect to Redis server (will use memory store):', err.message);
-      rawClient = new MemoryRedisStore();
+      connectionStatus = 'connected';
+      lastErrorMessage = null;
+      console.log(`[Redis] Connected successfully to ${isTls ? 'Upstash Redis (TLS)' : 'Redis'} at ${maskedUrl}`);
     });
 
-  // Adapter wrapping ioredis with typed interface
-  rawClient = {
-    get: (key) => redisInstance.get(key),
-    set: (key, val, ex, secs) => (ex && secs ? redisInstance.set(key, val, ex, secs) : redisInstance.set(key, val)),
-    del: (...keys) => redisInstance.del(...keys),
-    sadd: (key, ...members) => redisInstance.sadd(key, ...members),
-    srem: (key, ...members) => redisInstance.srem(key, ...members),
-    smembers: (key) => redisInstance.smembers(key),
-    sismember: (key, member) => redisInstance.sismember(key, member),
-    expire: (key, secs) => redisInstance.expire(key, secs),
-    keys: (pattern) => redisInstance.keys(pattern),
-    ping: () => redisInstance.ping(),
-    quit: async () => {
-      await redisInstance.quit().catch(() => {});
-    },
-  };
-} catch (err) {
-  console.warn('[Redis] Exception initializing ioredis, using MemoryStore:', err);
-  rawClient = new MemoryRedisStore();
+    redisInstance.on('error', (err) => {
+      lastErrorMessage = err.message;
+      if (isProduction) {
+        connectionStatus = 'disconnected';
+        console.error(`[Redis Error] Upstash connection issue: ${err.message}`);
+      } else {
+        if (!isRealRedis) {
+          connectionStatus = 'degraded';
+        }
+        console.warn(`[Redis Dev Warning] ${err.message} (using fallback if unavailable)`);
+      }
+    });
+
+    redisInstance.on('close', () => {
+      if (connectionStatus === 'connected') {
+        connectionStatus = isProduction ? 'disconnected' : 'degraded';
+        console.warn('[Redis] Connection closed.');
+      }
+    });
+
+    // Adapter wrapping ioredis with typed interface
+    rawClient = {
+      get: (key) => redisInstance.get(key),
+      set: (key, val, ex, secs) => (ex && secs ? redisInstance.set(key, val, ex, secs) : redisInstance.set(key, val)),
+      del: (...keys) => redisInstance.del(...keys),
+      sadd: (key, ...members) => redisInstance.sadd(key, ...members),
+      srem: (key, ...members) => redisInstance.srem(key, ...members),
+      smembers: (key) => redisInstance.smembers(key),
+      sismember: (key, member) => redisInstance.sismember(key, member),
+      expire: (key, secs) => redisInstance.expire(key, secs),
+      keys: (pattern) => redisInstance.keys(pattern),
+      ping: () => redisInstance.ping(),
+      quit: async () => {
+        await redisInstance.quit().catch(() => {});
+      },
+    };
+
+    // Attempt initial connection asynchronously
+    redisInstance
+      .connect()
+      .then(() => {
+        isRealRedis = true;
+        connectionStatus = 'connected';
+      })
+      .catch((err) => {
+        lastErrorMessage = err.message;
+        if (isProduction) {
+          connectionStatus = 'disconnected';
+          console.error(`[Redis Production Failure] Unable to connect to Upstash Redis at ${maskedUrl}: ${err.message}`);
+        } else {
+          connectionStatus = 'degraded';
+          console.warn(`[Redis Dev Fallback] Unable to connect to Redis (${err.message}). Using in-memory fallback store.`);
+          rawClient = new MemoryRedisStore();
+        }
+      });
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    lastErrorMessage = errorMsg;
+    if (isProduction) {
+      connectionStatus = 'disconnected';
+      console.error(`[Redis Initialization Failure]: ${errorMsg}`);
+    } else {
+      connectionStatus = 'degraded';
+      console.warn(`[Redis Initialization Warning]: ${errorMsg}. Using in-memory fallback.`);
+      rawClient = new MemoryRedisStore();
+    }
+  }
 }
 
 // Export raw storage
 export const redisStore = rawClient;
 
 // High-level Temporary Redis Storage Helper API
-const TTL_PRESENCE_SECONDS = 180; // 3 minutes without ping
+const TTL_PRESENCE_SECONDS = 180; // 3 minutes without heartbeat
 const TTL_FRIENDS_SECONDS = 86400 * 3; // 3 days
 const TTL_ROOM_SECONDS = 7200; // 2 hours
 
 export const redisMultiplayer = {
+  isReady(): boolean {
+    if (isProduction) {
+      return connectionStatus === 'connected' && isRealRedis;
+    }
+    return connectionStatus === 'connected' || connectionStatus === 'degraded';
+  },
+
+  async getHealth(): Promise<RedisHealth> {
+    let pingMs: number | undefined;
+    if (isRealRedis && activeRedisInstance && connectionStatus === 'connected') {
+      try {
+        const start = Date.now();
+        await activeRedisInstance.ping();
+        pingMs = Date.now() - start;
+      } catch {
+        connectionStatus = isProduction ? 'disconnected' : 'degraded';
+      }
+    }
+
+    const isTls = (rawRedisUrl || '').startsWith('rediss://');
+    let provider = 'Memory Fallback Store (Local Dev)';
+    if (isRealRedis) {
+      provider = isTls ? 'Upstash Redis (TLS)' : 'Local Redis';
+    }
+
+    return {
+      status: connectionStatus,
+      isRealRedis,
+      isMemoryFallback: !isRealRedis,
+      maskedUrl,
+      provider,
+      pingMs,
+      lastError: lastErrorMessage,
+    };
+  },
+
   // --- PRESENCE & LOBBY ---
   async registerPresence(player: OnlinePlayer): Promise<void> {
     const key = `rizz:presence:${player.id}`;
@@ -261,7 +417,7 @@ export const redisMultiplayer = {
       if (p) {
         players.push(p);
       } else {
-        // Expired from presence key, clean up set
+        // Expired from presence key, clean up stale member from set
         await redisStore.srem('rizz:online_players', id);
       }
     }
@@ -337,6 +493,10 @@ export const redisMultiplayer = {
     await redisStore.del(`rizz:room:${code.toUpperCase()}`);
   },
 
+  async touchRoom(code: string): Promise<void> {
+    await redisStore.expire(`rizz:room:${code.toUpperCase()}`, TTL_ROOM_SECONDS);
+  },
+
   async saveMatch(roomCode: string, match: OnlineMatchState): Promise<void> {
     const key = `rizz:match:${roomCode.toUpperCase()}`;
     await redisStore.set(key, JSON.stringify(match), 'EX', TTL_ROOM_SECONDS);
@@ -354,5 +514,9 @@ export const redisMultiplayer = {
 
   async deleteMatch(roomCode: string): Promise<void> {
     await redisStore.del(`rizz:match:${roomCode.toUpperCase()}`);
+  },
+
+  async touchMatch(roomCode: string): Promise<void> {
+    await redisStore.expire(`rizz:match:${roomCode.toUpperCase()}`, TTL_ROOM_SECONDS);
   },
 };
