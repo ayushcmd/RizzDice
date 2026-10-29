@@ -2,7 +2,7 @@ export type PlayerColor = 'red' | 'green' | 'yellow' | 'blue';
 
 export type PositionIndex = 1 | 2 | 3 | 4;
 
-export type GameMode = 'pass_and_play' | 'vs_computer';
+export type GameMode = 'pass_and_play' | 'vs_computer' | 'online_multiplayer';
 
 export interface Token {
   id: number; // 0..3 for each player

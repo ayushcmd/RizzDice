@@ -8,18 +8,22 @@ import type {
   PositionIndex,
   StoredSession,
 } from './types/ludo';
+import type { MultiplayerRoom, GameInvitation, OnlineMatchState } from './types/multiplayer';
 import { COLOR_CONFIGS, SAFE_SPOTS } from './utils/boardData';
 import { sounds } from './utils/soundManager';
 import { voices } from './utils/voiceManager';
 import { storageManager } from './utils/storageManager';
-import { chooseBotMove, canTokenMove, getStepSequence } from './utils/botAI';
+import { chooseBotMove, canTokenMove, getStepSequence, type IntermediateStep } from './utils/botAI';
+import { socketClient } from './utils/socketClient';
 import { StartMenu } from './components/Home/StartMenu';
 import { LudoBoard } from './components/Board/LudoBoard';
 import { DicePad } from './components/Controls/DicePad';
 import { MenuModal } from './components/Modals/MenuModal';
 import { WinnerModal } from './components/Modals/WinnerModal';
 import { VoiceSoundboardModal } from './components/Modals/VoiceSoundboardModal';
-import { Settings, RotateCcw, Sparkles } from 'lucide-react';
+import { OnlineModal } from './components/Online/OnlineModal';
+import { InvitationBanner } from './components/Online/InvitationBanner';
+import { Settings, RotateCcw, Sparkles, LogOut, Clock } from 'lucide-react';
 
 function createPlayer(
   id: number,
@@ -129,16 +133,28 @@ export function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSoundboardOpen, setIsSoundboardOpen] = useState(false);
 
+  // Online Multiplayer State
+  const [isOnlineModalOpen, setIsOnlineModalOpen] = useState(false);
+  const [onlineRoom, setOnlineRoom] = useState<MultiplayerRoom | null>(null);
+  const [incomingInvitation, setIncomingInvitation] = useState<GameInvitation | null>(null);
+  const [totalOnline, setTotalOnline] = useState(0);
+  const [disconnectedNotice, setDisconnectedNotice] = useState<{
+    name: string;
+    secondsLeft: number;
+  } | null>(null);
+
   // References to prevent race conditions during rapid clicks or bot turns
   const isTurnProcessingRef = useRef(false);
   const playersRef = useRef<Player[]>([]);
   const activePlayerIndexRef = useRef(0);
+  const onlineRoomRef = useRef<MultiplayerRoom | null>(null);
 
   // Sync refs with state
   useEffect(() => {
     playersRef.current = players;
     activePlayerIndexRef.current = activePlayerIndex;
-  }, [players, activePlayerIndex]);
+    onlineRoomRef.current = onlineRoom;
+  }, [players, activePlayerIndex, onlineRoom]);
 
   const activePlayer = players[activePlayerIndex] || null;
 
@@ -165,9 +181,9 @@ export function App() {
     }, 2800);
   }, []);
 
-  // Save session changes to local storage whenever game progresses
+  // Save session changes to local storage whenever game progresses (offline modes only)
   useEffect(() => {
-    if (gameState === 'PLAYING' && players.length >= 2) {
+    if (gameState === 'PLAYING' && players.length >= 2 && currentGameMode !== 'online_multiplayer') {
       const sessionData = {
         gameState,
         gameMode: currentGameMode,
@@ -216,7 +232,7 @@ export function App() {
     storageManager.savePreferences({ voiceEnabled: next });
   };
 
-  // Start match initialization
+  // Start offline match initialization
   const handleStartGame = (
     mode: GameMode,
     playerCount: 2 | 3 | 4,
@@ -248,6 +264,7 @@ export function App() {
       ];
     }
 
+    setOnlineRoom(null);
     setCurrentGameMode(mode);
     setPlayers(newPlayers);
     setActivePlayerIndex(0);
@@ -282,6 +299,46 @@ export function App() {
     });
   };
 
+  // Start Online Match Initializer
+  const handleStartOnlineMatch = (room: MultiplayerRoom) => {
+    const positionMap: Record<PlayerColor, PositionIndex> = {
+      red: 1,
+      green: 2,
+      blue: 3,
+      yellow: 4,
+    };
+
+    const count = room.maxPlayers;
+    const roomSeats = room.seats.slice(0, count);
+
+    const initialOnlinePlayers: Player[] = roomSeats.map((seat, idx) =>
+      createPlayer(
+        idx,
+        seat.playerName || `Player ${idx + 1}`,
+        seat.color,
+        positionMap[seat.color],
+        false
+      )
+    );
+
+    setOnlineRoom(room);
+    setCurrentGameMode('online_multiplayer');
+    setPlayers(initialOnlinePlayers);
+    setActivePlayerIndex(0);
+    setDiceValue(6);
+
+    const myId = socketClient.getPlayerId();
+    const isHostSeat = roomSeats[0]?.playerId === myId;
+    setCanRoll(isHostSeat);
+    setIsRolling(false);
+    setHasExtraChance(false);
+    setConsecutiveSixes(0);
+    setSelectableTokens([]);
+    setWinners([]);
+    setGameState('PLAYING');
+    isTurnProcessingRef.current = false;
+  };
+
   // Resume saved session from local storage
   const handleResumeSession = (session: StoredSession) => {
     setCurrentGameMode(session.gameMode);
@@ -293,7 +350,6 @@ export function App() {
     setHasExtraChance(session.hasExtraChance);
     setConsecutiveSixes(session.consecutiveSixes || 0);
     setWinners(session.winners);
-    // If waiting for token move, recompute selectable tokens
     if (!session.canRoll) {
       const activeP = session.players[session.activePlayerIndex];
       if (activeP && !activeP.isBot) {
@@ -331,7 +387,7 @@ export function App() {
     isTurnProcessingRef.current = false;
   }, []);
 
-  // Execute a token move step-by-step
+  // Offline step-by-step token movement executor
   const executeTokenMove = useCallback(
     (token: Token, rolledValue: number) => {
       isTurnProcessingRef.current = true;
@@ -340,7 +396,7 @@ export function App() {
       const config = COLOR_CONFIGS[token.color];
       const currentList = playersRef.current;
 
-      // Case A: Spawning token from base yard on 6 (smooth single step into starting square)
+      // Spawning token from base yard on 6
       if (!token.isAlive && rolledValue === 6) {
         sounds.play('step');
         voices.handleGameEvent('ROLL_SIX', token.color);
@@ -374,14 +430,14 @@ export function App() {
         return;
       }
 
-      // Case B: Advancing an alive token step-by-step
+      // Advancing an alive token step-by-step
       const stepSequence = getStepSequence(token, rolledValue);
       if (stepSequence.length === 0) {
         isTurnProcessingRef.current = false;
         return;
       }
 
-      const stepDelay = 185; // 185ms per square: smooth, readable, and responsive
+      const stepDelay = 185;
       let stepIndex = 0;
 
       const runNextStep = () => {
@@ -415,12 +471,12 @@ export function App() {
           return;
         }
 
-        // All intermediate steps completed! Now evaluate final landing square rules
+        // All intermediate steps completed!
         const finalStep = stepSequence[stepSequence.length - 1];
         const latestPlayers = playersRef.current;
         let gainedExtraTurn = false;
 
-        // Sub-case 1: Reached Home Center (57 steps)
+        // Reached Home Center (57 steps)
         if (finalStep.isHomeCenter) {
           sounds.play('panta');
           voices.handleGameEvent('HOME', token.color);
@@ -447,7 +503,6 @@ export function App() {
 
             const remainingActive = updatedWithWin.filter((p) => !p.hasWon);
             if (remainingActive.length <= 1) {
-              // Match is over!
               setTimeout(() => {
                 storageManager.clearActiveSession();
                 setActiveSession(null);
@@ -456,14 +511,12 @@ export function App() {
               return;
             }
 
-            // Player won, rotate turn to next active player without extra turn
             setTimeout(() => {
               switchPlayers(updatedWithWin);
             }, 450);
             return;
           }
 
-          // Token reached home but player hasn't completed all 4 tokens -> extra roll!
           setTimeout(() => {
             setHasExtraChance(true);
             setCanRoll(true);
@@ -472,13 +525,12 @@ export function App() {
           return;
         }
 
-        // Sub-case 2: Landed on perimeter or home stretch square
+        // Landed on perimeter or home stretch square
         const destBlock = finalStep.block;
         const targetIsSafe = SAFE_SPOTS.has(destBlock);
         let capturedEnemy = false;
 
         const updatedWithCapture = latestPlayers.map((p) => {
-          // If another player has token on same non-safe block -> capture!
           if (p.id !== token.playerIndex && !p.hasWon && !targetIsSafe) {
             const hasVictim = p.tokens.some((t) => t.isAlive && t.currBlock === destBlock);
             if (hasVictim) {
@@ -506,7 +558,6 @@ export function App() {
         setPlayers(updatedWithCapture);
         playersRef.current = updatedWithCapture;
 
-        // Sound & Voice triggers
         if (capturedEnemy) {
           sounds.play('death');
           voices.handleGameEvent('CAPTURE', token.color);
@@ -532,28 +583,371 @@ export function App() {
         }, 350);
       };
 
-      // Start sequential movement
       runNextStep();
     },
     [switchPlayers, winners, triggerReactionBadge]
   );
 
+  // Online Authoritative Token Step Movement Executor
+  const executeOnlineTokenStepMovement = useCallback(
+    (
+      playerIndex: number,
+      tokenId: number,
+      stepSequence: IntermediateStep[],
+      isSpawning: boolean,
+      capturedToken?: { color: PlayerColor; tokenId: number; yardSlot: number },
+      _playerWon?: boolean,
+      isGameOver?: boolean,
+      extraChance?: boolean,
+      nextPlayerIndex?: number,
+      finalMatch?: OnlineMatchState
+    ) => {
+      isTurnProcessingRef.current = true;
+      setSelectableTokens([]);
+
+      const currentList = playersRef.current;
+      const targetPlayer = currentList[playerIndex];
+      if (!targetPlayer) {
+        if (finalMatch) setPlayers(finalMatch.players);
+        isTurnProcessingRef.current = false;
+        return;
+      }
+      const token = targetPlayer.tokens.find((t) => t.id === tokenId);
+      if (!token) {
+        if (finalMatch) setPlayers(finalMatch.players);
+        isTurnProcessingRef.current = false;
+        return;
+      }
+
+      const config = COLOR_CONFIGS[token.color];
+
+      // Spawning on 6
+      if (isSpawning) {
+        sounds.play('step');
+        voices.handleGameEvent('ROLL_SIX', token.color);
+        triggerReactionBadge(token.color, '🎲', 'Spawned!');
+
+        const updated = currentList.map((p) => {
+          if (p.id !== playerIndex) return p;
+          return {
+            ...p,
+            tokens: p.tokens.map((t) => {
+              if (t.id !== tokenId) return t;
+              return {
+                ...t,
+                isAlive: true,
+                currBlock: config.startPosition,
+                numberOfSteps: 0,
+                currWinnerBlock: 0,
+              };
+            }),
+          };
+        });
+
+        setPlayers(updated);
+        playersRef.current = updated;
+
+        const myId = socketClient.getPlayerId();
+        const mySeat = onlineRoomRef.current?.seats.find((s) => s.playerId === myId);
+        const amIActive = mySeat?.slot === playerIndex;
+
+        setTimeout(() => {
+          setHasExtraChance(true);
+          setCanRoll(amIActive);
+          isTurnProcessingRef.current = false;
+        }, 350);
+        return;
+      }
+
+      // Step-by-step traversal
+      const stepDelay = 185;
+      let stepIndex = 0;
+
+      const runNextOnlineStep = () => {
+        if (stepIndex < stepSequence.length) {
+          const step = stepSequence[stepIndex];
+          sounds.playStep();
+
+          setPlayers((prevPlayers) => {
+            const updated = prevPlayers.map((p) => {
+              if (p.id !== playerIndex) return p;
+              return {
+                ...p,
+                tokens: p.tokens.map((t) => {
+                  if (t.id !== tokenId) return t;
+                  return {
+                    ...t,
+                    currBlock: step.block,
+                    numberOfSteps: step.numberOfSteps,
+                    currWinnerBlock: step.currWinnerBlock,
+                    hasCompleted: step.isHomeCenter,
+                  };
+                }),
+              };
+            });
+            playersRef.current = updated;
+            return updated;
+          });
+
+          stepIndex++;
+          setTimeout(runNextOnlineStep, stepDelay);
+          return;
+        }
+
+        // Final landing evaluations
+        const finalStep = stepSequence[stepSequence.length - 1];
+        if (finalStep?.isHomeCenter) {
+          sounds.play('panta');
+          voices.handleGameEvent('HOME', token.color);
+          triggerReactionBadge(token.color, '🏁', 'Home!');
+        } else if (capturedToken) {
+          sounds.play('death');
+          voices.handleGameEvent('CAPTURE', token.color);
+          triggerReactionBadge(token.color, '⚔️', 'Captured!');
+        } else if (SAFE_SPOTS.has(finalStep?.block || -1)) {
+          sounds.play('safe');
+          triggerReactionBadge(token.color, '🛡️', 'Safe!');
+        }
+
+        if (finalMatch) {
+          setPlayers(finalMatch.players);
+          playersRef.current = finalMatch.players;
+          if (nextPlayerIndex !== undefined) {
+            setActivePlayerIndex(nextPlayerIndex);
+          }
+        }
+
+        if (isGameOver) {
+          setGameState('WINNER');
+          isTurnProcessingRef.current = false;
+          return;
+        }
+
+        const myId = socketClient.getPlayerId();
+        const mySeat = onlineRoomRef.current?.seats.find((s) => s.playerId === myId);
+        const resolvedNextIdx = nextPlayerIndex !== undefined ? nextPlayerIndex : activePlayerIndexRef.current;
+        const isMyTurnNow = mySeat?.slot === resolvedNextIdx;
+
+        setTimeout(() => {
+          setHasExtraChance(Boolean(extraChance));
+          setCanRoll(isMyTurnNow);
+          isTurnProcessingRef.current = false;
+        }, 350);
+      };
+
+      runNextOnlineStep();
+    },
+    [triggerReactionBadge]
+  );
+
+  // Setup Socket Listeners
+  useEffect(() => {
+    socketClient.connect();
+
+    const unsubLobby = socketClient.on('lobby_updated', (data: unknown) => {
+      const d = data as { totalOnline: number };
+      setTotalOnline(d.totalOnline);
+    });
+
+    const unsubInvite = socketClient.on('invite_incoming', (inv: unknown) => {
+      setIncomingInvitation(inv as GameInvitation);
+    });
+
+    const unsubInviteClear = socketClient.on('invite_cleared', () => {
+      setIncomingInvitation(null);
+    });
+
+    const unsubGameStarted = socketClient.on('game_started', (data: unknown) => {
+      const d = data as { match: OnlineMatchState; room: MultiplayerRoom };
+      handleStartOnlineMatch(d.room);
+    });
+
+    const unsubDiceRolled = socketClient.on('game_dice_rolled', (data: unknown) => {
+      const d = data as {
+        diceValue: number;
+        activePlayerIndex: number;
+        consecutiveSixes: number;
+        selectableTokenIds: number[];
+        isThreeSixes: boolean;
+        autoPassTurn: boolean;
+        match: OnlineMatchState;
+      };
+
+      sounds.play('diceroll');
+      setIsRolling(true);
+      setCanRoll(false);
+
+      setTimeout(() => {
+        setIsRolling(false);
+        setDiceValue(d.diceValue);
+        setConsecutiveSixes(d.consecutiveSixes);
+
+        const currP = d.match.players[d.activePlayerIndex];
+        if (d.diceValue === 6 && currP) {
+          voices.handleGameEvent('ROLL_SIX', currP.color);
+        }
+
+        if (d.isThreeSixes && currP) {
+          triggerReactionBadge(currP.color, '⚠️', '3 Sixes Forfeit!');
+        }
+
+        if (d.autoPassTurn) {
+          if (!d.isThreeSixes && currP) {
+            triggerReactionBadge(currP.color, '🚫', 'No Moves');
+          }
+          setActivePlayerIndex(d.match.activePlayerIndex);
+          const myId = socketClient.getPlayerId();
+          const mySeat = onlineRoomRef.current?.seats.find((s) => s.playerId === myId);
+          setCanRoll(mySeat?.slot === d.match.activePlayerIndex);
+        } else {
+          // Tokens selectable
+          const myId = socketClient.getPlayerId();
+          const mySeat = onlineRoomRef.current?.seats.find((s) => s.playerId === myId);
+          if (mySeat?.slot === d.activePlayerIndex) {
+            const activeTokens = currP?.tokens || [];
+            const selectable = activeTokens.filter((t) => d.selectableTokenIds.includes(t.id));
+            setSelectableTokens(selectable);
+            // If only 1 move and it's mine, auto-execute
+            if (selectable.length === 1 && onlineRoomRef.current) {
+              setTimeout(() => {
+                socketClient.moveToken(onlineRoomRef.current!.code, selectable[0].id);
+              }, 400);
+            }
+          }
+        }
+      }, 350);
+    });
+
+    const unsubTokenMoved = socketClient.on('game_token_moved', (data: unknown) => {
+      const d = data as {
+        tokenId: number;
+        playerIndex: number;
+        stepSequence: IntermediateStep[];
+        isSpawning: boolean;
+        capturedToken?: { color: PlayerColor; tokenId: number; yardSlot: number };
+        playerWon?: boolean;
+        isGameOver?: boolean;
+        extraChance: boolean;
+        nextPlayerIndex: number;
+        match: OnlineMatchState;
+      };
+
+      executeOnlineTokenStepMovement(
+        d.playerIndex,
+        d.tokenId,
+        d.stepSequence,
+        d.isSpawning,
+        d.capturedToken,
+        d.playerWon,
+        d.isGameOver,
+        d.extraChance,
+        d.nextPlayerIndex,
+        d.match
+      );
+    });
+
+    const unsubSync = socketClient.on('game_sync', (data: unknown) => {
+      const match = (data as { match: OnlineMatchState }).match;
+      setPlayers(match.players);
+      setActivePlayerIndex(match.activePlayerIndex);
+      setDiceValue(match.diceValue);
+      setWinners(match.winners);
+      setDisconnectedNotice(null);
+
+      const myId = socketClient.getPlayerId();
+      const mySeat = onlineRoomRef.current?.seats.find((s) => s.playerId === myId);
+      const isMine = mySeat?.slot === match.activePlayerIndex;
+      setCanRoll(isMine && match.canRoll);
+
+      if (isMine && !match.canRoll && match.selectableTokenIds.length > 0) {
+        const currP = match.players[match.activePlayerIndex];
+        if (currP) {
+          setSelectableTokens(currP.tokens.filter((t) => match.selectableTokenIds.includes(t.id)));
+        }
+      }
+    });
+
+    const unsubReaction = socketClient.on('game_reaction', (data: unknown) => {
+      const d = data as { color: PlayerColor; badge: string; text: string };
+      triggerReactionBadge(d.color, d.badge, d.text);
+    });
+
+    const unsubGameOver = socketClient.on('game_over', (data: unknown) => {
+      const d = data as { winners: WinnerRecord[] };
+      setWinners(d.winners);
+      setGameState('WINNER');
+    });
+
+    const unsubConnChanged = socketClient.on('player_connection_changed', (data: unknown) => {
+      const d = data as {
+        playerId: string;
+        playerName: string;
+        isConnected: boolean;
+        gracePeriodSeconds?: number;
+      };
+      if (!d.isConnected) {
+        setDisconnectedNotice({
+          name: d.playerName,
+          secondsLeft: d.gracePeriodSeconds || 120,
+        });
+      } else {
+        setDisconnectedNotice(null);
+      }
+    });
+
+    const unsubForfeited = socketClient.on('player_forfeited', (data: unknown) => {
+      const d = data as { playerName: string };
+      setDisconnectedNotice(null);
+      triggerReactionBadge('red', '🏳️', `${d.playerName} Forfeited`);
+    });
+
+    const unsubRoomClosed = socketClient.on('room_closed', () => {
+      setOnlineRoom(null);
+      setGameState('MENU');
+    });
+
+    return () => {
+      unsubLobby();
+      unsubInvite();
+      unsubInviteClear();
+      unsubGameStarted();
+      unsubDiceRolled();
+      unsubTokenMoved();
+      unsubSync();
+      unsubReaction();
+      unsubGameOver();
+      unsubConnChanged();
+      unsubForfeited();
+      unsubRoomClosed();
+    };
+  }, [triggerReactionBadge, executeOnlineTokenStepMovement]);
+
   // Roll dice action
   const handleRollDice = useCallback(() => {
     if (!canRoll || isRolling || !activePlayer || isTurnProcessingRef.current) return;
 
+    // Online Multiplayer: Server Authoritative
+    if (currentGameMode === 'online_multiplayer') {
+      if (!onlineRoom) return;
+      const myId = socketClient.getPlayerId();
+      const mySeat = onlineRoom.seats.find((s) => s.playerId === myId);
+      if (!mySeat || mySeat.slot !== activePlayerIndex) return;
+
+      socketClient.rollDice(onlineRoom.code);
+      return;
+    }
+
+    // Offline modes (Pass 'N Play, vs Computer)
     setIsRolling(true);
     setCanRoll(false);
     setSelectableTokens([]);
     sounds.play('diceroll');
 
     setTimeout(() => {
-      // 100% Fair random roll 1..6
       const roll = Math.floor(Math.random() * 6) + 1;
       setDiceValue(roll);
       setIsRolling(false);
 
-      // Check 3 consecutive 6s penalty
       if (roll === 6) {
         voices.handleGameEvent('ROLL_SIX', activePlayer.color);
         const nextSixCount = consecutiveSixes + 1;
@@ -570,30 +964,24 @@ export function App() {
         setConsecutiveSixes(0);
       }
 
-      // Evaluate valid movable tokens
       const movable = activePlayer.tokens.filter((t) => canTokenMove(t, roll));
 
       if (movable.length === 0) {
-        // No moves possible -> switch turn
         triggerReactionBadge(activePlayer.color, '🚫', 'No Moves');
         setTimeout(() => {
           switchPlayers();
         }, 650);
       } else if (movable.length === 1) {
-        // Exactly 1 move possible -> auto-move!
         setTimeout(() => {
           executeTokenMove(movable[0], roll);
         }, 350);
       } else {
-        // Multiple moves possible
         if (activePlayer.isBot) {
-          // Bot evaluates best move
           const chosen = chooseBotMove(activePlayer, playersRef.current, roll) || movable[0];
           setTimeout(() => {
             executeTokenMove(chosen, roll);
           }, 450);
         } else {
-          // Human player selects
           setSelectableTokens(movable);
           isTurnProcessingRef.current = false;
         }
@@ -603,48 +991,55 @@ export function App() {
     canRoll,
     isRolling,
     activePlayer,
+    currentGameMode,
+    onlineRoom,
+    activePlayerIndex,
     consecutiveSixes,
-    executeTokenMove,
-    switchPlayers,
     triggerReactionBadge,
+    switchPlayers,
+    executeTokenMove,
   ]);
 
-  // Handle Token Click by Human Player
-  // Fixed: removed !canRoll guard so player can click during token selection
+  // Token click handler
   const handleTokenClick = (token: Token) => {
-    if (
-      isTurnProcessingRef.current ||
-      isRolling ||
-      !activePlayer ||
-      activePlayer.isBot ||
-      token.playerIndex !== activePlayer.id ||
-      selectableTokens.length === 0 ||
-      !selectableTokens.some((t) => t.playerIndex === token.playerIndex && t.id === token.id)
-    ) {
+    if (currentGameMode === 'online_multiplayer') {
+      if (!onlineRoom || isTurnProcessingRef.current) return;
+      const myId = socketClient.getPlayerId();
+      const mySeat = onlineRoom.seats.find((s) => s.playerId === myId);
+      if (!mySeat || mySeat.slot !== activePlayerIndex) return;
+
+      const isSelectable = selectableTokens.some((t) => t.id === token.id);
+      if (!isSelectable) return;
+
+      socketClient.moveToken(onlineRoom.code, token.id);
       return;
     }
 
-    // Immediately debounce further clicks
-    isTurnProcessingRef.current = true;
-    setSelectableTokens([]);
+    if (canRoll || isRolling || isTurnProcessingRef.current) return;
+
+    if (token.playerIndex !== activePlayerIndex) return;
+
+    const isSelectable = selectableTokens.some((t) => t.id === token.id);
+    if (!isSelectable) return;
+
     executeTokenMove(token, diceValue);
   };
 
-  // Custom player renaming during gameplay
+  // Rename player name
   const handleRenamePlayer = (playerId: number, newName: string) => {
     const updated = players.map((p) => {
       if (p.id !== playerId) return p;
       return { ...p, name: newName };
     });
     setPlayers(updated);
+    playersRef.current = updated;
 
-    // Save customized name into preferences
-    const targetPlayer = players.find((p) => p.id === playerId);
-    if (targetPlayer) {
+    const activeP = updated.find((p) => p.id === playerId);
+    if (activeP) {
       storageManager.savePreferences({
         defaultPlayerNames: {
           ...preferences.defaultPlayerNames,
-          [targetPlayer.color]: newName,
+          [activeP.color]: newName,
         },
       });
     }
@@ -660,10 +1055,11 @@ export function App() {
     setIsSettingsOpen(false);
   };
 
-  // Bot Turn Automation Effect
+  // Bot Turn Automation Effect (Offline vs Computer only)
   useEffect(() => {
     if (
       gameState === 'PLAYING' &&
+      currentGameMode === 'vs_computer' &&
       activePlayer?.isBot &&
       canRoll &&
       !isRolling &&
@@ -674,16 +1070,31 @@ export function App() {
       }, 650);
       return () => clearTimeout(timer);
     }
-  }, [gameState, activePlayer?.isBot, canRoll, isRolling, handleRollDice]);
+  }, [gameState, currentGameMode, activePlayer?.isBot, canRoll, isRolling, handleRollDice]);
 
   // Main Menu Screen
   if (gameState === 'MENU') {
     return (
       <>
+        {/* Floating Game Invitation Toast */}
+        <InvitationBanner
+          invitation={incomingInvitation}
+          onAccept={(roomCode) => {
+            socketClient.clearIncomingInvitation();
+            socketClient.joinRoom(roomCode);
+            setIsOnlineModalOpen(true);
+          }}
+          onDecline={(inviteId, fromId) => {
+            socketClient.declineInvitation(inviteId, fromId);
+          }}
+        />
+
         <StartMenu
           onStartGame={handleStartGame}
           onResumeSession={handleResumeSession}
           onOpenSoundboard={() => setIsSoundboardOpen(true)}
+          onOpenOnlineModal={() => setIsOnlineModalOpen(true)}
+          onlineCount={totalOnline}
           activeSession={activeSession}
           initialPlayerCount={preferences.lastSelectedPlayerCount}
           initialMode={preferences.lastSelectedGameMode}
@@ -695,6 +1106,16 @@ export function App() {
           onToggleMusic={handleToggleMusic}
           onToggleVoice={handleToggleVoice}
         />
+
+        <OnlineModal
+          isOpen={isOnlineModalOpen}
+          onClose={() => setIsOnlineModalOpen(false)}
+          onStartMatch={(room) => {
+            setIsOnlineModalOpen(false);
+            handleStartOnlineMatch(room);
+          }}
+        />
+
         <VoiceSoundboardModal
           isOpen={isSoundboardOpen}
           voiceEnabled={voiceEnabled}
@@ -705,12 +1126,30 @@ export function App() {
     );
   }
 
-  // Active Game Screen — Apple-inspired Glassmorphism with deep charcoal background & champagne gold accents
+  // Active Game Screen
+  const isOnlineMode = currentGameMode === 'online_multiplayer';
+  const myId = socketClient.getPlayerId();
+  const mySeat = onlineRoom?.seats.find((s) => s.playerId === myId) || null;
+  const isMyTurn = isOnlineMode ? (mySeat !== null && activePlayerIndex === mySeat.slot) : true;
+
   return (
     <div className="min-h-screen bg-[#111111] text-[#F5F5F5] flex flex-col justify-between p-2 sm:p-4 select-none overflow-x-hidden">
+      {/* Floating Game Invitation Toast */}
+      <InvitationBanner
+        invitation={incomingInvitation}
+        onAccept={(roomCode) => {
+          socketClient.clearIncomingInvitation();
+          socketClient.joinRoom(roomCode);
+          setIsOnlineModalOpen(true);
+        }}
+        onDecline={(inviteId, fromId) => {
+          socketClient.declineInvitation(inviteId, fromId);
+        }}
+      />
+
       {/* Top Navbar */}
       <header className="flex items-center justify-between max-w-4xl w-full mx-auto px-4 py-2.5 mb-2 bg-[#161616]/90 backdrop-blur-xl rounded-2xl border border-white/[0.12] shadow-[0_8px_32px_rgba(0,0,0,0.5)]">
-        {/* Brand */}
+        {/* Brand & Mode Tag */}
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-xl bg-white/[0.06] border border-[#E9BC42]/40 flex items-center justify-center shadow-md">
             <img
@@ -720,11 +1159,18 @@ export function App() {
             />
           </div>
           <div className="flex flex-col">
-            <span className="font-black text-sm uppercase tracking-wider text-[#F5F5F5] leading-none">
-              RIZZ DICE
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="font-black text-sm uppercase tracking-wider text-[#F5F5F5] leading-none">
+                RIZZ DICE
+              </span>
+              {isOnlineMode && onlineRoom && (
+                <span className="text-[9px] font-mono font-bold bg-[#E9BC42]/15 text-[#E9BC42] px-1.5 py-0.2 rounded border border-[#E9BC42]/30">
+                  #{onlineRoom.code}
+                </span>
+              )}
+            </div>
             <span className="text-[10px] uppercase font-bold tracking-widest text-[#E9BC42]">
-              Ludo King Redefined
+              {isOnlineMode ? 'Online Multiplayer' : 'Ludo King Redefined'}
             </span>
           </div>
         </div>
@@ -742,22 +1188,38 @@ export function App() {
             <span className="hidden sm:inline">Soundboard</span>
           </button>
 
-          {/* Restart Match */}
-          <button
-            type="button"
-            onClick={() =>
-              handleStartGame(
-                currentGameMode,
-                players.length as 2 | 3 | 4,
-                players.filter((p) => p.isBot).length,
-                players.map((p) => p.name)
-              )
-            }
-            className="p-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-[#A3A3A3] hover:text-[#F5F5F5] border border-white/[0.08] transition cursor-pointer"
-            title="Restart Match"
-          >
-            <RotateCcw className="w-4 h-4" />
-          </button>
+          {/* Leave Online Match / Restart Offline */}
+          {isOnlineMode ? (
+            <button
+              type="button"
+              onClick={() => {
+                if (onlineRoom) socketClient.leaveRoom(onlineRoom.code);
+                setOnlineRoom(null);
+                setGameState('MENU');
+              }}
+              className="px-2.5 py-1.5 rounded-xl bg-white/[0.06] hover:bg-red-500/20 text-[#A3A3A3] hover:text-red-300 border border-white/[0.08] transition cursor-pointer flex items-center gap-1 text-xs font-bold"
+              title="Leave Online Match"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Leave</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() =>
+                handleStartGame(
+                  currentGameMode,
+                  players.length as 2 | 3 | 4,
+                  players.filter((p) => p.isBot).length,
+                  players.map((p) => p.name)
+                )
+              }
+              className="p-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-[#A3A3A3] hover:text-[#F5F5F5] border border-white/[0.08] transition cursor-pointer"
+              title="Restart Match"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+          )}
 
           {/* Settings Modal */}
           <button
@@ -771,6 +1233,21 @@ export function App() {
         </div>
       </header>
 
+      {/* Disconnected Player Grace Period Banner */}
+      {disconnectedNotice && (
+        <div className="w-full max-w-lg mx-auto mb-2 p-2.5 bg-amber-500/15 border border-amber-500/40 rounded-xl flex items-center justify-between text-xs text-amber-200 animate-pulse">
+          <div className="flex items-center gap-2">
+            <Clock className="w-4 h-4 text-amber-400" />
+            <span>
+              <strong>{disconnectedNotice.name}</strong> disconnected. 120s grace period active...
+            </span>
+          </div>
+          <span className="font-mono font-black text-amber-300">
+            {disconnectedNotice.secondsLeft}s
+          </span>
+        </div>
+      )}
+
       {/* Main Board Arena with 4 Player Stations */}
       <main className="flex-1 flex flex-col items-center justify-center max-w-4xl w-full mx-auto px-1">
         {/* Top Player Stations (Red: Pos 1 Top-Left, Green: Pos 2 Top-Right) */}
@@ -779,7 +1256,7 @@ export function App() {
             <DicePad
               player={players.find((p) => p.position === 1)!}
               isActive={activePlayer?.position === 1}
-              canRoll={canRoll}
+              canRoll={isOnlineMode ? (isMyTurn && activePlayer?.position === 1 && canRoll) : canRoll}
               isRolling={isRolling}
               diceValue={diceValue}
               hasExtraChance={hasExtraChance}
@@ -796,7 +1273,7 @@ export function App() {
             <DicePad
               player={players.find((p) => p.position === 2)!}
               isActive={activePlayer?.position === 2}
-              canRoll={canRoll}
+              canRoll={isOnlineMode ? (isMyTurn && activePlayer?.position === 2 && canRoll) : canRoll}
               isRolling={isRolling}
               diceValue={diceValue}
               hasExtraChance={hasExtraChance}
@@ -824,7 +1301,7 @@ export function App() {
             <DicePad
               player={players.find((p) => p.position === 3)!}
               isActive={activePlayer?.position === 3}
-              canRoll={canRoll}
+              canRoll={isOnlineMode ? (isMyTurn && activePlayer?.position === 3 && canRoll) : canRoll}
               isRolling={isRolling}
               diceValue={diceValue}
               hasExtraChance={hasExtraChance}
@@ -841,7 +1318,7 @@ export function App() {
             <DicePad
               player={players.find((p) => p.position === 4)!}
               isActive={activePlayer?.position === 4}
-              canRoll={canRoll}
+              canRoll={isOnlineMode ? (isMyTurn && activePlayer?.position === 4 && canRoll) : canRoll}
               isRolling={isRolling}
               diceValue={diceValue}
               hasExtraChance={hasExtraChance}
@@ -875,6 +1352,10 @@ export function App() {
           )
         }
         onMainMenu={() => {
+          if (isOnlineMode && onlineRoom) {
+            socketClient.leaveRoom(onlineRoom.code);
+            setOnlineRoom(null);
+          }
           setGameState('MENU');
           setActiveSession(storageManager.getActiveSession());
         }}
@@ -894,15 +1375,23 @@ export function App() {
       {gameState === 'WINNER' && (
         <WinnerModal
           winners={winners}
-          onPlayAgain={() =>
+          onPlayAgain={() => {
+            if (isOnlineMode && onlineRoom) {
+              socketClient.leaveRoom(onlineRoom.code);
+              setOnlineRoom(null);
+            }
             handleStartGame(
-              currentGameMode,
+              currentGameMode === 'online_multiplayer' ? 'pass_and_play' : currentGameMode,
               players.length as 2 | 3 | 4,
               players.filter((p) => p.isBot).length,
               players.map((p) => p.name)
-            )
-          }
+            );
+          }}
           onMainMenu={() => {
+            if (isOnlineMode && onlineRoom) {
+              socketClient.leaveRoom(onlineRoom.code);
+              setOnlineRoom(null);
+            }
             setGameState('MENU');
             setActiveSession(null);
           }}

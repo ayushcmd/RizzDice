@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Users, Bot, Volume2, VolumeX, Music, Mic, MicOff, Play, Sparkles, RotateCcw, Sliders } from 'lucide-react';
+import { Users, Bot, Volume2, VolumeX, Music, Mic, MicOff, Play, Sparkles, RotateCcw, Sliders, Globe } from 'lucide-react';
 import type { GameMode, PlayerColor, StoredSession } from '../../types/ludo';
 import { COLOR_CONFIGS } from '../../utils/boardData';
 import { sounds } from '../../utils/soundManager';
@@ -13,6 +13,8 @@ interface StartMenuProps {
   ) => void;
   onResumeSession?: (session: StoredSession) => void;
   onOpenSoundboard?: () => void;
+  onOpenOnlineModal?: () => void;
+  onlineCount?: number;
   activeSession: StoredSession | null;
   initialPlayerCount?: 2 | 3 | 4;
   initialMode?: GameMode;
@@ -29,6 +31,8 @@ export const StartMenu: React.FC<StartMenuProps> = ({
   onStartGame,
   onResumeSession,
   onOpenSoundboard,
+  onOpenOnlineModal,
+  onlineCount = 0,
   activeSession,
   initialPlayerCount = 4,
   initialMode = 'pass_and_play',
@@ -214,6 +218,37 @@ export const StartMenu: React.FC<StartMenuProps> = ({
               Resume
             </button>
           </div>
+        )}
+
+        {/* Online Multiplayer Lobby & Friends Button */}
+        {onOpenOnlineModal && (
+          <button
+            type="button"
+            onClick={onOpenOnlineModal}
+            className="w-full mb-5 p-3.5 bg-gradient-to-r from-emerald-500/15 via-white/[0.03] to-transparent border border-emerald-500/35 hover:border-emerald-500/70 rounded-2xl flex items-center justify-between transition group cursor-pointer shadow-[0_4px_20px_rgba(16,185,129,0.1)]"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 group-hover:scale-105 transition">
+                <Globe className="w-5 h-5 animate-pulse" />
+              </div>
+              <div className="flex flex-col text-left">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-black uppercase tracking-wider text-[#F5F5F5] group-hover:text-emerald-300 transition">
+                    Online Multiplayer
+                  </span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                </div>
+                <span className="text-[11px] text-[#A3A3A3]">
+                  Live Lobby • Friends • Private Rooms • Redis
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="px-2.5 py-1 bg-emerald-500/20 text-emerald-300 font-bold text-xs rounded-xl border border-emerald-500/30">
+                {onlineCount} Online
+              </span>
+            </div>
+          </button>
         )}
 
         {/* Mode Tabs (Apple Segmented Glass Control) */}
