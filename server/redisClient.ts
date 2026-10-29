@@ -1,7 +1,15 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-// Load .env.local first (user secrets), then fallback to .env
-dotenv.config({ path: '.env.local' });
-dotenv.config();
+
+// Resolve project root directory dynamically from file location
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const projectRootDir = path.resolve(__dirname, '..');
+
+// Load root .env.local first (user secrets), then fallback to root .env
+dotenv.config({ path: path.join(projectRootDir, '.env.local') });
+dotenv.config({ path: path.join(projectRootDir, '.env') });
 
 import { Redis, type RedisOptions } from 'ioredis';
 import type {
@@ -238,13 +246,8 @@ if (!rawRedisUrl) {
       return Math.min(times * 250, 2000);
     },
     // TLS configuration for Upstash Redis (rediss://)
-    ...(isTls
-      ? {
-          tls: {
-            rejectUnauthorized: false, // ensures secure connection without client CA friction
-          },
-        }
-      : {}),
+    // Secure TLS with standard certificate validation (rejectUnauthorized is true by default)
+    ...(isTls ? { tls: {} } : {}),
   };
 
   try {

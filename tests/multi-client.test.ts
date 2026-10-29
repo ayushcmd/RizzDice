@@ -70,6 +70,11 @@ async function runMultiClientSuite() {
     await redisMultiplayer.deleteRoom(testCode);
   });
 
+  await it('verifies TLS settings enforce certificate validation without rejectUnauthorized false', async () => {
+    const redisClientSource = await import('fs').then(fs => fs.promises.readFile('server/redisClient.ts', 'utf-8'));
+    assert.ok(!redisClientSource.includes('rejectUnauthorized: false'), 'rejectUnauthorized: false must not be present');
+  });
+
   // -------------------------------------------------------------
   // [2] Multi-Client Concurrent Session Verification
   // -------------------------------------------------------------
@@ -214,10 +219,15 @@ async function runMultiClientSuite() {
 
     // 9. Reconnection & Grace Period Verification
     await it('Preserves room seat and allows seamless reconnection with same playerId', async () => {
-      // Player B temporarily disconnects
-      clientB.disconnect();
-
-      await new Promise((r) => setTimeout(r, 200));
+      // Player B temporarily disconnects - Client A receives connection_changed
+      await new Promise<void>((resolve) => {
+        clientA.on('player:connection_changed', (data: { playerId: string; isConnected: boolean }) => {
+          if (data.playerId === 'RIZZ-BOB' && !data.isConnected) {
+            resolve();
+          }
+        });
+        clientB.disconnect();
+      });
 
       const roomDuringDisconnect = await redisMultiplayer.getRoom(createdRoomCode);
       assert.ok(roomDuringDisconnect);
@@ -228,15 +238,14 @@ async function runMultiClientSuite() {
       // Reconnect Player B with same playerId
       const clientBReconnected = ClientSocket(clientUrl, { transports: ['websocket'] });
       await new Promise<void>((resolve) => {
+        clientBReconnected.on('game:sync', () => {
+          resolve();
+        });
         clientBReconnected.on('connect', () => {
           clientBReconnected.emit('player:init', { playerId: 'RIZZ-BOB', playerName: 'Bob' });
         });
-        clientBReconnected.on('player:ready', () => {
-          resolve();
-        });
       });
 
-      await new Promise((r) => setTimeout(r, 300));
       const roomAfterReconnect = await redisMultiplayer.getRoom(createdRoomCode);
       const bobSeatAfter = roomAfterReconnect?.seats.find((s) => s.playerId === 'RIZZ-BOB');
       assert.strictEqual(bobSeatAfter?.isConnected, true);

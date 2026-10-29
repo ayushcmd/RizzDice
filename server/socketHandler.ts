@@ -1,5 +1,5 @@
 import { Server, Socket } from 'socket.io';
-import { redisMultiplayer } from './redisClient';
+import { redisMultiplayer, redisStore } from './redisClient';
 import { LudoEngine } from './ludoEngine';
 import type {
   OnlinePlayer,
@@ -74,7 +74,24 @@ export function setupSocketHandlers(io: Server) {
 
       // Check if this player was inside an active room or match
       const existingPresence = await redisMultiplayer.getPlayerPresence(playerId);
-      const roomCode = existingPresence?.currentRoomCode;
+      let roomCode = existingPresence?.currentRoomCode;
+
+      if (!roomCode) {
+        // Fallback: check if player has a reserved seat in an active room
+        const roomKeys = await redisStore.keys('rizz:room:*');
+        for (const rKey of roomKeys) {
+          const raw = await redisStore.get(rKey);
+          if (raw) {
+            try {
+              const r: MultiplayerRoom = JSON.parse(raw);
+              if (r.seats.some((s) => s.playerId === playerId)) {
+                roomCode = r.code;
+                break;
+              }
+            } catch {}
+          }
+        }
+      }
 
       const onlinePlayer: OnlinePlayer = {
         id: playerId,
@@ -609,6 +626,11 @@ export function setupSocketHandlers(io: Server) {
       if (!playerId) return;
 
       socketToPlayerMap.delete(socket.id);
+
+      // If the player has already connected with a newer socket, ignore late disconnect
+      if (playerToSocketMap.get(playerId) && playerToSocketMap.get(playerId) !== socket.id) {
+        return;
+      }
       playerToSocketMap.delete(playerId);
 
       const presence = await redisMultiplayer.getPlayerPresence(playerId);
