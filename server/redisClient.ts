@@ -30,6 +30,10 @@ export interface IRedisStorage {
   sismember(key: string, member: string): Promise<number>;
   expire(key: string, seconds: number): Promise<number>;
   keys(pattern: string): Promise<string[]>;
+  incr(key: string): Promise<number>;
+  rpush(key: string, ...elements: string[]): Promise<number>;
+  lrange(key: string, start: number, stop: number): Promise<string[]>;
+  ltrim(key: string, start: number, stop: number): Promise<'OK'>;
   ping(): Promise<string>;
   quit(): Promise<void>;
 }
@@ -64,6 +68,7 @@ export function maskRedisUrl(rawUrl?: string): string {
 export class MemoryRedisStore implements IRedisStorage {
   private kv = new Map<string, { value: string; expiresAt: number | null }>();
   private sets = new Map<string, { members: Set<string>; expiresAt: number | null }>();
+  private lists = new Map<string, { elements: string[]; expiresAt: number | null }>();
 
   private cleanKey(key: string): boolean {
     const now = Date.now();
@@ -75,6 +80,11 @@ export class MemoryRedisStore implements IRedisStorage {
     const setItem = this.sets.get(key);
     if (setItem && setItem.expiresAt && setItem.expiresAt <= now) {
       this.sets.delete(key);
+      return false;
+    }
+    const listItem = this.lists.get(key);
+    if (listItem && listItem.expiresAt && listItem.expiresAt <= now) {
+      this.lists.delete(key);
       return false;
     }
     return true;
@@ -97,6 +107,7 @@ export class MemoryRedisStore implements IRedisStorage {
     for (const key of keys) {
       if (this.kv.delete(key)) count++;
       if (this.sets.delete(key)) count++;
+      if (this.lists.delete(key)) count++;
     }
     return count;
   }
@@ -156,6 +167,11 @@ export class MemoryRedisStore implements IRedisStorage {
       s.expiresAt = expiresAt;
       found = 1;
     }
+    const l = this.lists.get(key);
+    if (l) {
+      l.expiresAt = expiresAt;
+      found = 1;
+    }
     return found;
   }
 
@@ -179,7 +195,60 @@ export class MemoryRedisStore implements IRedisStorage {
       }
       if (regex.test(k) && !result.includes(k)) result.push(k);
     }
+    for (const [k, v] of this.lists.entries()) {
+      if (v.expiresAt && v.expiresAt <= now) {
+        this.lists.delete(k);
+        continue;
+      }
+      if (regex.test(k) && !result.includes(k)) result.push(k);
+    }
     return result;
+  }
+
+  async incr(key: string): Promise<number> {
+    this.cleanKey(key);
+    const item = this.kv.get(key);
+    const current = item ? parseInt(item.value, 10) || 0 : 0;
+    const next = current + 1;
+    this.kv.set(key, { value: String(next), expiresAt: item?.expiresAt || null });
+    return next;
+  }
+
+  async rpush(key: string, ...elements: string[]): Promise<number> {
+    this.cleanKey(key);
+    let l = this.lists.get(key);
+    if (!l) {
+      l = { elements: [], expiresAt: null };
+      this.lists.set(key, l);
+    }
+    l.elements.push(...elements);
+    return l.elements.length;
+  }
+
+  async lrange(key: string, start: number, stop: number): Promise<string[]> {
+    if (!this.cleanKey(key)) return [];
+    const l = this.lists.get(key);
+    if (!l) return [];
+    const len = l.elements.length;
+    const s = start < 0 ? Math.max(0, len + start) : start;
+    const e = stop < 0 ? Math.max(-1, len + stop) : stop;
+    if (s >= len || s > e) return [];
+    return l.elements.slice(s, e + 1);
+  }
+
+  async ltrim(key: string, start: number, stop: number): Promise<'OK'> {
+    this.cleanKey(key);
+    const l = this.lists.get(key);
+    if (!l) return 'OK';
+    const len = l.elements.length;
+    const s = start < 0 ? Math.max(0, len + start) : start;
+    const e = stop < 0 ? Math.max(-1, len + stop) : stop;
+    if (s >= len || s > e) {
+      l.elements = [];
+    } else {
+      l.elements = l.elements.slice(s, e + 1);
+    }
+    return 'OK';
   }
 
   async ping(): Promise<string> {
@@ -189,6 +258,7 @@ export class MemoryRedisStore implements IRedisStorage {
   async quit(): Promise<void> {
     this.kv.clear();
     this.sets.clear();
+    this.lists.clear();
   }
 }
 
@@ -221,6 +291,10 @@ if (!rawRedisUrl) {
       sismember: async () => 0,
       expire: async () => 0,
       keys: async () => [],
+      incr: async () => 0,
+      rpush: async () => 0,
+      lrange: async () => [],
+      ltrim: async () => 'OK',
       ping: async () => { throw new Error('Redis not configured in production'); },
       quit: async () => {},
     };
@@ -292,6 +366,10 @@ if (!rawRedisUrl) {
       sismember: (key, member) => redisInstance.sismember(key, member),
       expire: (key, secs) => redisInstance.expire(key, secs),
       keys: (pattern) => redisInstance.keys(pattern),
+      incr: (key) => redisInstance.incr(key),
+      rpush: (key, ...elements) => redisInstance.rpush(key, ...elements),
+      lrange: (key, start, stop) => redisInstance.lrange(key, start, stop),
+      ltrim: (key, start, stop) => redisInstance.ltrim(key, start, stop),
       ping: () => redisInstance.ping(),
       quit: async () => {
         await redisInstance.quit().catch(() => {});
@@ -521,5 +599,72 @@ export const redisMultiplayer = {
 
   async touchMatch(roomCode: string): Promise<void> {
     await redisStore.expire(`rizz:match:${roomCode.toUpperCase()}`, TTL_ROOM_SECONDS);
+  },
+
+  // --- ROOM EVENT STREAM & INBOX (Vercel Serverless Sync) ---
+  async pushRoomEvent(roomCode: string, type: string, data: unknown): Promise<number> {
+    const counterKey = `rizz:seq:${roomCode.toUpperCase()}`;
+    const eventsKey = `rizz:events:${roomCode.toUpperCase()}`;
+    const seq = await redisStore.incr(counterKey);
+    const eventItem = JSON.stringify({
+      id: seq,
+      type,
+      data,
+      timestamp: Date.now(),
+    });
+    await redisStore.rpush(eventsKey, eventItem);
+    await redisStore.ltrim(eventsKey, -50, -1); // Keep last 50 events
+    await redisStore.expire(counterKey, TTL_ROOM_SECONDS);
+    await redisStore.expire(eventsKey, TTL_ROOM_SECONDS);
+    return seq;
+  },
+
+  async getRoomEventsSince(
+    roomCode: string,
+    sinceId: number
+  ): Promise<Array<{ id: number; type: string; data: unknown; timestamp: number }>> {
+    const eventsKey = `rizz:events:${roomCode.toUpperCase()}`;
+    const rawList = await redisStore.lrange(eventsKey, 0, -1);
+    const events: Array<{ id: number; type: string; data: unknown; timestamp: number }> = [];
+    for (const raw of rawList) {
+      try {
+        const item = JSON.parse(raw);
+        if (item.id > sinceId) {
+          events.push(item);
+        }
+      } catch {}
+    }
+    return events;
+  },
+
+  async pushPlayerInbox(playerId: string, type: string, data: unknown): Promise<void> {
+    const key = `rizz:inbox:${playerId}`;
+    const item = JSON.stringify({
+      id: Date.now() + Math.random(),
+      type,
+      data,
+      timestamp: Date.now(),
+    });
+    await redisStore.rpush(key, item);
+    await redisStore.ltrim(key, -20, -1);
+    await redisStore.expire(key, 300); // 5 minutes TTL
+  },
+
+  async getPlayerInbox(
+    playerId: string,
+    clear = true
+  ): Promise<Array<{ id: number; type: string; data: unknown; timestamp: number }>> {
+    const key = `rizz:inbox:${playerId}`;
+    const rawList = await redisStore.lrange(key, 0, -1);
+    const items: Array<{ id: number; type: string; data: unknown; timestamp: number }> = [];
+    for (const raw of rawList) {
+      try {
+        items.push(JSON.parse(raw));
+      } catch {}
+    }
+    if (clear && items.length > 0) {
+      await redisStore.del(key);
+    }
+    return items;
   },
 };

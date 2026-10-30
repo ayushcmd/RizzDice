@@ -17,6 +17,7 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import { setupSocketHandlers } from './socketHandler';
 import { redisMultiplayer, redisStore } from './redisClient';
+import vercelMultiplayerHandler from '../api/multiplayer';
 
 const app = express();
 const server = http.createServer(app);
@@ -48,6 +49,11 @@ app.get('/api/status', async (_req, res) => {
     const errorMsg = err instanceof Error ? err.message : 'Unknown error';
     res.status(500).json({ status: 'error', message: errorMsg });
   }
+});
+
+// Vercel Serverless Function forwarder for local development and testing
+app.all('/api/multiplayer', async (req, res) => {
+  await vercelMultiplayerHandler(req, res);
 });
 
 const io = new Server(server, {

@@ -9,7 +9,7 @@
     "dev:server": "npx tsx server/index.ts",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "test": "npx tsx tests/gameplay.test.ts && npx tsx tests/multiplayer.test.ts && npx tsx tests/multi-client.test.ts && npx tsx tests/movement.test.ts",
+    "test": "npx tsx tests/gameplay.test.ts && npx tsx tests/multiplayer.test.ts && npx tsx tests/multi-client.test.ts && npx tsx tests/movement.test.ts && npx tsx tests/vercel-multiplayer.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {
