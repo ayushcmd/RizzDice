@@ -13,7 +13,7 @@ import { COLOR_CONFIGS, SAFE_SPOTS } from './utils/boardData';
 import { sounds } from './utils/soundManager';
 import { voices } from './utils/voiceManager';
 import { storageManager } from './utils/storageManager';
-import { chooseBotMove, canTokenMove, getStepSequence, type IntermediateStep } from './utils/botAI';
+import { chooseBotMove, canTokenMove, calculateTokenMovement, type IntermediateStep } from './utils/botAI';
 import { socketClient } from './utils/socketClient';
 import { StartMenu } from './components/Home/StartMenu';
 import { LudoBoard } from './components/Board/LudoBoard';
@@ -393,27 +393,36 @@ export function App() {
       isTurnProcessingRef.current = true;
       setSelectableTokens([]);
 
-      const config = COLOR_CONFIGS[token.color];
+      const liveToken =
+        playersRef.current.find((p) => p.id === token.playerIndex)?.tokens.find((t) => t.id === token.id) ||
+        token;
+
+      const movement = calculateTokenMovement(liveToken, rolledValue);
+      if (!movement.isValid) {
+        isTurnProcessingRef.current = false;
+        return;
+      }
+
       const currentList = playersRef.current;
 
       // Spawning token from base yard on 6
-      if (!token.isAlive && rolledValue === 6) {
+      if (movement.isSpawning) {
         sounds.play('step');
-        voices.handleGameEvent('ROLL_SIX', token.color);
-        triggerReactionBadge(token.color, '🎲', 'Spawned!');
+        voices.handleGameEvent('ROLL_SIX', liveToken.color);
+        triggerReactionBadge(liveToken.color, '🎲', 'Spawned!');
 
         const updated = currentList.map((p) => {
-          if (p.id !== token.playerIndex) return p;
+          if (p.id !== liveToken.playerIndex) return p;
           return {
             ...p,
             tokens: p.tokens.map((t) => {
-              if (t.id !== token.id) return t;
+              if (t.id !== liveToken.id) return t;
               return {
                 ...t,
                 isAlive: true,
-                currBlock: config.startPosition,
-                numberOfSteps: 0,
-                currWinnerBlock: 0,
+                currBlock: movement.finalBlock,
+                numberOfSteps: movement.finalSteps,
+                currWinnerBlock: movement.finalWinnerBlockIndex,
               };
             }),
           };
@@ -431,7 +440,7 @@ export function App() {
       }
 
       // Advancing an alive token step-by-step
-      const stepSequence = getStepSequence(token, rolledValue);
+      const stepSequence = movement.stepSequence;
       if (stepSequence.length === 0) {
         isTurnProcessingRef.current = false;
         return;
@@ -810,7 +819,11 @@ export function App() {
             // If only 1 move and it's mine, auto-execute
             if (selectable.length === 1 && onlineRoomRef.current) {
               setTimeout(() => {
-                socketClient.moveToken(onlineRoomRef.current!.code, selectable[0].id);
+                if (onlineRoomRef.current && !isTurnProcessingRef.current) {
+                  isTurnProcessingRef.current = true;
+                  setSelectableTokens([]);
+                  socketClient.moveToken(onlineRoomRef.current.code, selectable[0].id);
+                }
               }, 400);
             }
           }
@@ -848,7 +861,11 @@ export function App() {
 
     const unsubSync = socketClient.on('game_sync', (data: unknown) => {
       const match = (data as { match: OnlineMatchState }).match;
-      setPlayers(match.players);
+      // Do not overwrite board tokens if an animation is actively processing steps
+      if (!isTurnProcessingRef.current) {
+        setPlayers(match.players);
+        playersRef.current = match.players;
+      }
       setActivePlayerIndex(match.activePlayerIndex);
       setDiceValue(match.diceValue);
       setWinners(match.winners);
@@ -1011,6 +1028,9 @@ export function App() {
       const isSelectable = selectableTokens.some((t) => t.id === token.id);
       if (!isSelectable) return;
 
+      // Immediately debounce to prevent rapid double-clicks
+      isTurnProcessingRef.current = true;
+      setSelectableTokens([]);
       socketClient.moveToken(onlineRoom.code, token.id);
       return;
     }
@@ -1022,7 +1042,11 @@ export function App() {
     const isSelectable = selectableTokens.some((t) => t.id === token.id);
     if (!isSelectable) return;
 
-    executeTokenMove(token, diceValue);
+    const liveToken =
+      playersRef.current.find((p) => p.id === token.playerIndex)?.tokens.find((t) => t.id === token.id) ||
+      token;
+
+    executeTokenMove(liveToken, diceValue);
   };
 
   // Rename player name

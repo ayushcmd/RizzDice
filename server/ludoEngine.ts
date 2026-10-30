@@ -1,7 +1,7 @@
 import type { Player, Token, PlayerColor, PositionIndex, WinnerRecord } from '../src/types/ludo';
 import type { MultiplayerRoom, OnlineMatchState } from '../src/types/multiplayer';
-import { COLOR_CONFIGS, SAFE_SPOTS } from '../src/utils/boardData';
-import { canTokenMove, getStepSequence, type IntermediateStep } from '../src/utils/botAI';
+import { SAFE_SPOTS } from '../src/utils/boardData';
+import { canTokenMove, calculateTokenMovement, type IntermediateStep } from '../src/utils/botAI';
 
 export function createPlayerInstance(
   id: number,
@@ -193,15 +193,19 @@ export class LudoEngine {
     const token = player.tokens.find((t) => t.id === tokenId);
     if (!token) throw new Error('Token not found');
 
-    const config = COLOR_CONFIGS[token.color];
     const rolledValue = match.diceValue;
+    const movement = calculateTokenMovement(token, rolledValue);
+
+    if (!movement.isValid) {
+      throw new Error('Illegal token move!');
+    }
 
     // Case 1: Spawning out of yard on six
-    if (!token.isAlive && rolledValue === 6) {
+    if (movement.isSpawning) {
       token.isAlive = true;
-      token.currBlock = config.startPosition;
-      token.numberOfSteps = 0;
-      token.currWinnerBlock = 0;
+      token.currBlock = movement.finalBlock;
+      token.numberOfSteps = movement.finalSteps;
+      token.currWinnerBlock = movement.finalWinnerBlockIndex;
 
       match.canRoll = true;
       match.selectableTokenIds = [];
@@ -216,7 +220,7 @@ export class LudoEngine {
     }
 
     // Case 2: Advancing along track / home stretch
-    const sequence = getStepSequence(token, rolledValue);
+    const sequence = movement.stepSequence;
     if (sequence.length === 0) {
       throw new Error('Cannot compute path for token');
     }

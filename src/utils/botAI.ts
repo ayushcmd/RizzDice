@@ -8,110 +8,161 @@ export interface IntermediateStep {
   isHomeCenter: boolean;
 }
 
+export interface TokenMovementResult {
+  isValid: boolean;
+  isSpawning: boolean;
+  stepSequence: IntermediateStep[];
+  finalBlock: number;
+  finalSteps: number;
+  finalWinnerBlockIndex: number;
+  willFinish: boolean;
+}
+
+/**
+ * Unified authoritative movement calculation for Rizz Dice Ludo track.
+ * Used identically by server engine, client animations, and Bot AI.
+ */
+export function calculateTokenMovement(token: Token, diceValue: number): TokenMovementResult {
+  const config = COLOR_CONFIGS[token.color];
+
+  // 1. Validate dice value (1..6)
+  if (!Number.isInteger(diceValue) || diceValue < 1 || diceValue > 6) {
+    return {
+      isValid: false,
+      isSpawning: false,
+      stepSequence: [],
+      finalBlock: token.currBlock,
+      finalSteps: token.numberOfSteps,
+      finalWinnerBlockIndex: token.currWinnerBlock,
+      willFinish: false,
+    };
+  }
+
+  // 2. Completed tokens cannot move again
+  if (token.hasCompleted) {
+    return {
+      isValid: false,
+      isSpawning: false,
+      stepSequence: [],
+      finalBlock: token.currBlock,
+      finalSteps: token.numberOfSteps,
+      finalWinnerBlockIndex: token.currWinnerBlock,
+      willFinish: true,
+    };
+  }
+
+  // 3. Token in yard / home base (isAlive === false)
+  if (!token.isAlive) {
+    if (diceValue === 6) {
+      return {
+        isValid: true,
+        isSpawning: true,
+        stepSequence: [],
+        finalBlock: config.startPosition,
+        finalSteps: 0,
+        finalWinnerBlockIndex: 0,
+        willFinish: false,
+      };
+    }
+    return {
+      isValid: false,
+      isSpawning: false,
+      stepSequence: [],
+      finalBlock: token.currBlock,
+      finalSteps: token.numberOfSteps,
+      finalWinnerBlockIndex: token.currWinnerBlock,
+      willFinish: false,
+    };
+  }
+
+  // 4. Token on the board (isAlive === true)
+  const targetSteps = token.numberOfSteps + diceValue;
+
+  // Exact finishing rule: overshoot rejected!
+  if (targetSteps > 57) {
+    return {
+      isValid: false,
+      isSpawning: false,
+      stepSequence: [],
+      finalBlock: token.currBlock,
+      finalSteps: token.numberOfSteps,
+      finalWinnerBlockIndex: token.currWinnerBlock,
+      willFinish: false,
+    };
+  }
+
+  // Compute exact intermediate steps
+  const sequence: IntermediateStep[] = [];
+  for (let s = 1; s <= diceValue; s++) {
+    const stepCount = token.numberOfSteps + s;
+
+    if (stepCount === 57) {
+      // Reached Home Center (Panta)
+      sequence.push({
+        block: 999,
+        numberOfSteps: 57,
+        currWinnerBlock: 6,
+        isHomeCenter: true,
+      });
+    } else if (stepCount > 50) {
+      // Inside home stretch (steps 51..56 correspond to winnerBlocks[0..5])
+      const winnerIndex = stepCount - 51; // 0..5
+      const block = config.winnerBlocks[winnerIndex];
+      sequence.push({
+        block,
+        numberOfSteps: stepCount,
+        currWinnerBlock: winnerIndex + 1, // 1..6
+        isHomeCenter: false,
+      });
+    } else {
+      // Perimeter track (steps 1..50)
+      const block = (config.startPosition + stepCount) % 52;
+      sequence.push({
+        block,
+        numberOfSteps: stepCount,
+        currWinnerBlock: 0,
+        isHomeCenter: false,
+      });
+    }
+  }
+
+  const finalStep = sequence[sequence.length - 1];
+
+  return {
+    isValid: true,
+    isSpawning: false,
+    stepSequence: sequence,
+    finalBlock: finalStep.block,
+    finalSteps: finalStep.numberOfSteps,
+    finalWinnerBlockIndex: finalStep.currWinnerBlock,
+    willFinish: finalStep.isHomeCenter,
+  };
+}
+
 /**
  * Computes the exact array of intermediate squares a token traverses step-by-step
  */
 export function getStepSequence(token: Token, diceValue: number): IntermediateStep[] {
-  if (!token.isAlive || token.hasCompleted) return [];
-
-  const config = COLOR_CONFIGS[token.color];
-  const totalSteps = token.numberOfSteps + diceValue;
-  if (totalSteps > 57) return [];
-
-  const sequence: IntermediateStep[] = [];
-  let curr = token.currBlock;
-  let winnerIdx = token.currWinnerBlock;
-  let inWinnerZone = token.currWinnerBlock > 0;
-  let steps = token.numberOfSteps;
-
-  for (let s = 0; s < diceValue; s++) {
-    steps++;
-    if (steps === 57) {
-      sequence.push({
-        block: 999,
-        numberOfSteps: 57,
-        currWinnerBlock: winnerIdx,
-        isHomeCenter: true,
-      });
-      break;
-    }
-
-    if (inWinnerZone) {
-      curr = config.winnerBlocks[winnerIdx];
-      winnerIdx++;
-    } else {
-      if (curr === config.endPosition) {
-        inWinnerZone = true;
-        curr = config.winnerBlocks[winnerIdx];
-        winnerIdx++;
-      } else {
-        curr = curr >= 51 ? 0 : curr + 1;
-      }
-    }
-
-    sequence.push({
-      block: curr,
-      numberOfSteps: steps,
-      currWinnerBlock: winnerIdx,
-      isHomeCenter: false,
-    });
-  }
-
-  return sequence;
+  const result = calculateTokenMovement(token, diceValue);
+  return result.stepSequence;
 }
 
 /**
  * Predicts the resulting block for a token given a dice roll
  */
 export function calculateNextBlock(token: Token, diceValue: number): { nextBlock: number; willFinish: boolean } {
-  const config = COLOR_CONFIGS[token.color];
-  const newSteps = token.numberOfSteps + diceValue;
-
-  if (newSteps > 57) {
+  const result = calculateTokenMovement(token, diceValue);
+  if (!result.isValid) {
     return { nextBlock: token.currBlock, willFinish: false };
   }
-
-  if (newSteps === 57) {
-    return { nextBlock: 999, willFinish: true }; // Reached home center
-  }
-
-  if (!token.isAlive) {
-    return { nextBlock: config.startPosition, willFinish: false };
-  }
-
-  let curr = token.currBlock;
-  let winnerBlockIdx = token.currWinnerBlock;
-  let inWinnerZone = token.currWinnerBlock > 0;
-
-  for (let s = 0; s < diceValue; s++) {
-    if (inWinnerZone) {
-      curr = config.winnerBlocks[winnerBlockIdx];
-      winnerBlockIdx++;
-    } else {
-      if (curr === config.endPosition) {
-        inWinnerZone = true;
-        curr = config.winnerBlocks[winnerBlockIdx];
-        winnerBlockIdx++;
-      } else {
-        curr = curr >= 51 ? 0 : curr + 1;
-      }
-    }
-  }
-
-  return { nextBlock: curr, willFinish: false };
+  return { nextBlock: result.finalBlock, willFinish: result.willFinish };
 }
 
 /**
  * Checks whether a token can make a valid move with the given dice value
  */
 export function canTokenMove(token: Token, diceValue: number): boolean {
-  if (token.hasCompleted) return false;
-
-  if (!token.isAlive) {
-    return diceValue === 6;
-  }
-
-  return token.numberOfSteps + diceValue <= 57;
+  return calculateTokenMovement(token, diceValue).isValid;
 }
 
 /**
