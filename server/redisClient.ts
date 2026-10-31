@@ -18,11 +18,11 @@ import type {
   FriendRequest,
   MultiplayerRoom,
   OnlineMatchState,
-} from '../src/types/multiplayer';
+} from '../src/types/multiplayer.js';
 
 export interface IRedisStorage {
   get(key: string): Promise<string | null>;
-  set(key: string, value: string, exOption?: 'EX', seconds?: number): Promise<'OK' | null>;
+  set(key: string, value: string, exOption?: 'EX', seconds?: number, nxOption?: 'NX'): Promise<'OK' | null>;
   del(...keys: string[]): Promise<number>;
   sadd(key: string, ...members: string[]): Promise<number>;
   srem(key: string, ...members: string[]): Promise<number>;
@@ -96,7 +96,10 @@ export class MemoryRedisStore implements IRedisStorage {
     return item ? item.value : null;
   }
 
-  async set(key: string, value: string, exOption?: 'EX', seconds?: number): Promise<'OK'> {
+  async set(key: string, value: string, exOption?: 'EX', seconds?: number, nxOption?: 'NX'): Promise<'OK' | null> {
+    if (nxOption === 'NX' && this.cleanKey(key) && this.kv.has(key)) {
+      return null;
+    }
     const expiresAt = exOption === 'EX' && seconds ? Date.now() + seconds * 1000 : null;
     this.kv.set(key, { value, expiresAt });
     return 'OK';
@@ -269,7 +272,25 @@ const isProduction = process.env.NODE_ENV === 'production';
 const rawRedisUrl = process.env.REDIS_URL || (isProduction ? '' : 'redis://localhost:6379');
 const maskedUrl = maskRedisUrl(rawRedisUrl);
 
-let rawClient: IRedisStorage;
+const dummyFailingStorage: IRedisStorage = {
+  get: async () => null,
+  set: async () => null,
+  del: async () => 0,
+  sadd: async () => 0,
+  srem: async () => 0,
+  smembers: async () => [],
+  sismember: async () => 0,
+  expire: async () => 0,
+  keys: async () => [],
+  incr: async () => 0,
+  rpush: async () => 0,
+  lrange: async () => [],
+  ltrim: async () => 'OK',
+  ping: async () => { throw new Error('Redis not configured or disconnected in production'); },
+  quit: async () => {},
+};
+
+let rawClient: IRedisStorage = isProduction ? dummyFailingStorage : new MemoryRedisStore();
 let isRealRedis = false;
 let connectionStatus: 'connected' | 'connecting' | 'degraded' | 'disconnected' = 'connecting';
 let lastErrorMessage: string | null = null;
@@ -280,24 +301,7 @@ if (!rawRedisUrl) {
     connectionStatus = 'disconnected';
     lastErrorMessage = 'REDIS_URL environment variable is missing in production.';
     console.error(`[Redis Error] ${lastErrorMessage}`);
-    // Dummy failing storage in production when REDIS_URL is omitted
-    rawClient = {
-      get: async () => null,
-      set: async () => null,
-      del: async () => 0,
-      sadd: async () => 0,
-      srem: async () => 0,
-      smembers: async () => [],
-      sismember: async () => 0,
-      expire: async () => 0,
-      keys: async () => [],
-      incr: async () => 0,
-      rpush: async () => 0,
-      lrange: async () => [],
-      ltrim: async () => 'OK',
-      ping: async () => { throw new Error('Redis not configured in production'); },
-      quit: async () => {},
-    };
+    rawClient = dummyFailingStorage;
   } else {
     console.warn('[Redis Dev] No REDIS_URL provided. Initializing in-memory fallback for local development.');
     connectionStatus = 'degraded';
@@ -399,6 +403,7 @@ if (!rawRedisUrl) {
     lastErrorMessage = errorMsg;
     if (isProduction) {
       connectionStatus = 'disconnected';
+      rawClient = dummyFailingStorage;
       console.error(`[Redis Initialization Failure]: ${errorMsg}`);
     } else {
       connectionStatus = 'degraded';

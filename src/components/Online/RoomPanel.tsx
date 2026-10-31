@@ -10,6 +10,7 @@ import {
   KeyRound,
   Shield,
   Clock,
+  Bot,
 } from 'lucide-react';
 import type { MultiplayerRoom, FriendRecord } from '../../types/multiplayer';
 import { COLOR_CONFIGS } from '../../utils/boardData';
@@ -18,9 +19,10 @@ interface RoomPanelProps {
   currentRoom: MultiplayerRoom | null;
   myPlayerId: string;
   friends: FriendRecord[];
-  onCreateRoom: (maxPlayers: 2 | 3 | 4) => void;
+  onCreateRoom: (maxPlayers: 2 | 3 | 4, withBots?: boolean) => void;
   onJoinRoom: (roomCode: string) => void;
   onToggleReady: (roomCode: string) => void;
+  onToggleBots?: (roomCode: string) => void;
   onLeaveRoom: (roomCode: string) => void;
   onStartMatch: (roomCode: string) => void;
   onInviteFriend: (friendId: string, roomCode: string) => void;
@@ -33,11 +35,13 @@ export const RoomPanel: React.FC<RoomPanelProps> = ({
   onCreateRoom,
   onJoinRoom,
   onToggleReady,
+  onToggleBots,
   onLeaveRoom,
   onStartMatch,
   onInviteFriend,
 }) => {
   const [selectedMaxPlayers, setSelectedMaxPlayers] = useState<2 | 3 | 4>(4);
+  const [withBots, setWithBots] = useState(true);
   const [roomCodeInput, setRoomCodeInput] = useState('');
   const [copiedCode, setCopiedCode] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
@@ -94,13 +98,38 @@ export const RoomPanel: React.FC<RoomPanelProps> = ({
             })}
           </div>
 
+          {/* 4-Player Option: 2 Humans + 2 Bots Toggle */}
+          {selectedMaxPlayers === 4 && (
+            <div className="flex items-center justify-between p-2.5 bg-purple-500/10 border border-purple-500/20 rounded-xl">
+              <div className="flex items-center gap-2">
+                <Bot className="w-4 h-4 text-purple-400" />
+                <div className="flex flex-col">
+                  <span className="text-xs font-bold text-[#F5F5F5]">2 Humans + 2 Bots Mode</span>
+                  <span className="text-[10px] text-[#A3A3A3]">Fill remaining 2 seats with bots</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setWithBots(!withBots)}
+                className={`px-3 py-1 rounded-lg text-xs font-black uppercase transition cursor-pointer border ${
+                  withBots
+                    ? 'bg-purple-600 text-white border-purple-400'
+                    : 'bg-white/[0.06] text-[#A3A3A3] border-white/[0.1]'
+                }`}
+              >
+                {withBots ? 'ENABLED' : 'DISABLED'}
+              </button>
+            </div>
+          )}
+
           <button
             type="button"
-            onClick={() => onCreateRoom(selectedMaxPlayers)}
+            onClick={() => onCreateRoom(selectedMaxPlayers, selectedMaxPlayers === 4 ? withBots : false)}
             className="w-full py-3 bg-[#E9BC42] hover:bg-[#d8ab33] text-black font-black text-xs uppercase tracking-widest rounded-xl transition cursor-pointer flex items-center justify-center gap-2 shadow"
           >
             <Users className="w-4 h-4" />
             Create {selectedMaxPlayers}-Player Room
+            {selectedMaxPlayers === 4 && withBots ? ' (2H + 2B)' : ''}
           </button>
         </div>
 
@@ -141,7 +170,10 @@ export const RoomPanel: React.FC<RoomPanelProps> = ({
   const isHost = currentRoom.hostId === myPlayerId;
   const mySeat = currentRoom.seats.find((s) => s.playerId === myPlayerId);
   const occupiedSeats = currentRoom.seats.filter((s) => s.playerId !== null);
+  const humanOccupants = occupiedSeats.filter((s) => !s.isBot);
   const allOccupantsReady = occupiedSeats.every((s) => s.isReady);
+  const hasBots = currentRoom.seats.some((s) => s.isBot);
+  // Match can start if: host is present, at least 2 occupants, all occupants ready, and if 4-player with bots, both humans are ready
   const canStartMatch = isHost && occupiedSeats.length >= 2 && allOccupantsReady;
 
   return (
@@ -150,7 +182,7 @@ export const RoomPanel: React.FC<RoomPanelProps> = ({
       <div className="p-3.5 bg-white/[0.04] border border-[#E9BC42]/40 rounded-2xl flex items-center justify-between">
         <div className="flex flex-col">
           <span className="text-[10px] font-bold uppercase tracking-wider text-[#A3A3A3]">
-            Room Code ({currentRoom.maxPlayers} Players)
+            Room Code ({currentRoom.maxPlayers} Players{hasBots ? ' • 2H + 2B' : ''})
           </span>
           <span className="text-xl font-black font-mono tracking-widest text-[#E9BC42]">
             #{currentRoom.code}
@@ -158,6 +190,22 @@ export const RoomPanel: React.FC<RoomPanelProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          {isHost && currentRoom.maxPlayers === 4 && onToggleBots && (
+            <button
+              type="button"
+              onClick={() => onToggleBots(currentRoom.code)}
+              className={`py-1.5 px-2.5 text-xs font-bold rounded-xl transition cursor-pointer flex items-center gap-1.5 border ${
+                hasBots
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                  : 'bg-white/[0.06] text-[#A3A3A3] hover:text-white border-white/[0.1]'
+              }`}
+              title="Toggle 2 Bots in 4-Player Room"
+            >
+              <Bot className="w-3.5 h-3.5" />
+              <span>{hasBots ? '2 Bots: ON' : '+ 2 Bots'}</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={handleCopyCode}
@@ -190,7 +238,9 @@ export const RoomPanel: React.FC<RoomPanelProps> = ({
               key={`seat-${seat.slot}-${seat.color}`}
               className={`p-3 rounded-2xl border transition flex items-center justify-between ${
                 isOccupied
-                  ? 'bg-black/50 border-white/[0.12]'
+                  ? seat.isBot
+                    ? 'bg-purple-950/20 border-purple-500/30'
+                    : 'bg-black/50 border-white/[0.12]'
                   : 'bg-white/[0.02] border-dashed border-white/[0.10]'
               }`}
             >
@@ -202,7 +252,7 @@ export const RoomPanel: React.FC<RoomPanelProps> = ({
                   <img src={cfg.pawnImage} alt={cfg.name} className="w-full h-full object-contain" />
                 </div>
                 <div className="flex flex-col min-w-0">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="text-xs font-black text-[#F5F5F5] truncate">
                       {isOccupied ? seat.playerName : 'Waiting for Player...'}
                     </span>
@@ -214,6 +264,11 @@ export const RoomPanel: React.FC<RoomPanelProps> = ({
                     {seat.isHost && (
                       <span className="text-[9px] font-black uppercase px-1 py-0.2 bg-amber-500/20 text-amber-300 rounded flex items-center gap-0.5">
                         <Shield className="w-2.5 h-2.5" /> HOST
+                      </span>
+                    )}
+                    {seat.isBot && (
+                      <span className="text-[9px] font-black uppercase px-1 py-0.2 bg-purple-500/20 text-purple-300 border border-purple-500/30 rounded flex items-center gap-0.5">
+                        <Bot className="w-2.5 h-2.5" /> BOT
                       </span>
                     )}
                   </div>
@@ -318,8 +373,12 @@ export const RoomPanel: React.FC<RoomPanelProps> = ({
               <Play className="w-4 h-4 fill-current" />
               {occupiedSeats.length < 2
                 ? 'Waiting for Players...'
+                : hasBots && humanOccupants.length < 2
+                ? 'Waiting for 2nd Human Player to Join...'
                 : !allOccupantsReady
                 ? 'Waiting for All Players to Ready Up...'
+                : hasBots
+                ? 'Start 2 Human + 2 Bot Match'
                 : 'Start Online Match'}
             </button>
           )}

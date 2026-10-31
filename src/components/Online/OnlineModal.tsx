@@ -243,9 +243,10 @@ export const OnlineModal: React.FC<OnlineModalProps> = ({
               currentRoom={currentRoom}
               myPlayerId={myPlayerId}
               friends={friends}
-              onCreateRoom={(maxPlayers) => socketClient.createRoom(maxPlayers)}
+              onCreateRoom={(maxPlayers, withBots) => socketClient.createRoom(maxPlayers, withBots)}
               onJoinRoom={(code) => socketClient.joinRoom(code)}
               onToggleReady={(code) => socketClient.toggleReady(code)}
+              onToggleBots={(code) => socketClient.toggleBots(code)}
               onLeaveRoom={(code) => socketClient.leaveRoom(code)}
               onStartMatch={(code) => socketClient.startMatch(code)}
               onInviteFriend={(fId, code) => socketClient.sendGameInvitation(fId, code)}

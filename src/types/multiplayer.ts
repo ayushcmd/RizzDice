@@ -1,4 +1,4 @@
-import type { Player, PlayerColor, WinnerRecord } from './ludo';
+import type { Player, PlayerColor, WinnerRecord } from './ludo.js';
 
 export type PlayerPresenceStatus = 'AVAILABLE' | 'BUSY' | 'IN_GAME';
 
@@ -35,6 +35,7 @@ export interface RoomSeat {
   isHost: boolean;
   isConnected: boolean;
   disconnectedAt?: number | null;
+  isBot?: boolean;
 }
 
 export interface MultiplayerRoom {

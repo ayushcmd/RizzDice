@@ -1,5 +1,5 @@
-import type { Player, Token } from '../types/ludo';
-import { SAFE_SPOTS, COLOR_CONFIGS } from './boardData';
+import type { Player, Token } from '../types/ludo.js';
+import { SAFE_SPOTS, COLOR_CONFIGS } from './boardData.js';
 
 export interface IntermediateStep {
   block: number;

@@ -23,7 +23,7 @@ import { WinnerModal } from './components/Modals/WinnerModal';
 import { VoiceSoundboardModal } from './components/Modals/VoiceSoundboardModal';
 import { OnlineModal } from './components/Online/OnlineModal';
 import { InvitationBanner } from './components/Online/InvitationBanner';
-import { Settings, RotateCcw, Sparkles, LogOut, Clock } from 'lucide-react';
+import { Sparkles, Clock, Menu } from 'lucide-react';
 
 function createPlayer(
   id: number,
@@ -149,6 +149,30 @@ export function App() {
   const activePlayerIndexRef = useRef(0);
   const onlineRoomRef = useRef<MultiplayerRoom | null>(null);
 
+  // Active game timers registry to prevent memory leaks and dangling animations upon quitting/ending
+  const activeGameTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+
+  const safeSetTimeout = useCallback((fn: () => void, ms: number) => {
+    const timer = setTimeout(() => {
+      activeGameTimersRef.current.delete(timer);
+      fn();
+    }, ms);
+    activeGameTimersRef.current.add(timer);
+    return timer;
+  }, []);
+
+  const clearAllGameTimers = useCallback(() => {
+    activeGameTimersRef.current.forEach((t) => clearTimeout(t));
+    activeGameTimersRef.current.clear();
+    isTurnProcessingRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearAllGameTimers();
+    };
+  }, [clearAllGameTimers]);
+
   // Sync refs with state
   useEffect(() => {
     playersRef.current = players;
@@ -172,14 +196,14 @@ export function App() {
       [color]: { badge, text },
     }));
 
-    setTimeout(() => {
+    safeSetTimeout(() => {
       setActiveReactions((prev) => {
         const next = { ...prev };
         delete next[color];
         return next;
       });
     }, 2800);
-  }, []);
+  }, [safeSetTimeout]);
 
   // Save session changes to local storage whenever game progresses (offline modes only)
   useEffect(() => {
@@ -239,6 +263,7 @@ export function App() {
     botCount: number,
     playerNames: string[]
   ) => {
+    clearAllGameTimers();
     let newPlayers: Player[] = [];
 
     if (playerCount === 2) {
@@ -301,6 +326,7 @@ export function App() {
 
   // Start Online Match Initializer
   const handleStartOnlineMatch = (room: MultiplayerRoom) => {
+    clearAllGameTimers();
     const positionMap: Record<PlayerColor, PositionIndex> = {
       red: 1,
       green: 2,
@@ -317,7 +343,7 @@ export function App() {
         seat.playerName || `Player ${idx + 1}`,
         seat.color,
         positionMap[seat.color],
-        false
+        Boolean(seat.isBot)
       )
     );
 
@@ -341,6 +367,7 @@ export function App() {
 
   // Resume saved session from local storage
   const handleResumeSession = (session: StoredSession) => {
+    clearAllGameTimers();
     setCurrentGameMode(session.gameMode);
     setPlayers(session.players);
     setActivePlayerIndex(session.activePlayerIndex);
@@ -431,7 +458,7 @@ export function App() {
         setPlayers(updated);
         playersRef.current = updated;
 
-        setTimeout(() => {
+        safeSetTimeout(() => {
           setHasExtraChance(true);
           setCanRoll(true);
           isTurnProcessingRef.current = false;
@@ -476,7 +503,7 @@ export function App() {
           });
 
           stepIndex++;
-          setTimeout(runNextStep, stepDelay);
+          safeSetTimeout(runNextStep, stepDelay);
           return;
         }
 
@@ -512,7 +539,7 @@ export function App() {
 
             const remainingActive = updatedWithWin.filter((p) => !p.hasWon);
             if (remainingActive.length <= 1) {
-              setTimeout(() => {
+              safeSetTimeout(() => {
                 storageManager.clearActiveSession();
                 setActiveSession(null);
                 setGameState('WINNER');
@@ -520,13 +547,13 @@ export function App() {
               return;
             }
 
-            setTimeout(() => {
+            safeSetTimeout(() => {
               switchPlayers(updatedWithWin);
             }, 450);
             return;
           }
 
-          setTimeout(() => {
+          safeSetTimeout(() => {
             setHasExtraChance(true);
             setCanRoll(true);
             isTurnProcessingRef.current = false;
@@ -581,7 +608,7 @@ export function App() {
           gainedExtraTurn = true;
         }
 
-        setTimeout(() => {
+        safeSetTimeout(() => {
           if (gainedExtraTurn) {
             setHasExtraChance(true);
             setCanRoll(true);
@@ -594,7 +621,7 @@ export function App() {
 
       runNextStep();
     },
-    [switchPlayers, winners, triggerReactionBadge]
+    [switchPlayers, winners, triggerReactionBadge, safeSetTimeout]
   );
 
   // Online Authoritative Token Step Movement Executor
@@ -660,7 +687,7 @@ export function App() {
         const mySeat = onlineRoomRef.current?.seats.find((s) => s.playerId === myId);
         const amIActive = mySeat?.slot === playerIndex;
 
-        setTimeout(() => {
+        safeSetTimeout(() => {
           setHasExtraChance(true);
           setCanRoll(amIActive);
           isTurnProcessingRef.current = false;
@@ -699,7 +726,7 @@ export function App() {
           });
 
           stepIndex++;
-          setTimeout(runNextOnlineStep, stepDelay);
+          safeSetTimeout(runNextOnlineStep, stepDelay);
           return;
         }
 
@@ -737,7 +764,7 @@ export function App() {
         const resolvedNextIdx = nextPlayerIndex !== undefined ? nextPlayerIndex : activePlayerIndexRef.current;
         const isMyTurnNow = mySeat?.slot === resolvedNextIdx;
 
-        setTimeout(() => {
+        safeSetTimeout(() => {
           setHasExtraChance(Boolean(extraChance));
           setCanRoll(isMyTurnNow);
           isTurnProcessingRef.current = false;
@@ -746,7 +773,7 @@ export function App() {
 
       runNextOnlineStep();
     },
-    [triggerReactionBadge]
+    [triggerReactionBadge, safeSetTimeout]
   );
 
   // Setup Socket Listeners
@@ -786,7 +813,7 @@ export function App() {
       setIsRolling(true);
       setCanRoll(false);
 
-      setTimeout(() => {
+      safeSetTimeout(() => {
         setIsRolling(false);
         setDiceValue(d.diceValue);
         setConsecutiveSixes(d.consecutiveSixes);
@@ -818,7 +845,7 @@ export function App() {
             setSelectableTokens(selectable);
             // If only 1 move and it's mine, auto-execute
             if (selectable.length === 1 && onlineRoomRef.current) {
-              setTimeout(() => {
+              safeSetTimeout(() => {
                 if (onlineRoomRef.current && !isTurnProcessingRef.current) {
                   isTurnProcessingRef.current = true;
                   setSelectableTokens([]);
@@ -919,6 +946,13 @@ export function App() {
     });
 
     const unsubRoomClosed = socketClient.on('room_closed', () => {
+      clearAllGameTimers();
+      setOnlineRoom(null);
+      setGameState('MENU');
+    });
+
+    const unsubGameEnded = socketClient.on('game_ended', () => {
+      clearAllGameTimers();
       setOnlineRoom(null);
       setGameState('MENU');
     });
@@ -936,8 +970,9 @@ export function App() {
       unsubConnChanged();
       unsubForfeited();
       unsubRoomClosed();
+      unsubGameEnded();
     };
-  }, [triggerReactionBadge, executeOnlineTokenStepMovement]);
+  }, [triggerReactionBadge, executeOnlineTokenStepMovement, clearAllGameTimers]);
 
   // Roll dice action
   const handleRollDice = useCallback(() => {
@@ -960,7 +995,7 @@ export function App() {
     setSelectableTokens([]);
     sounds.play('diceroll');
 
-    setTimeout(() => {
+    safeSetTimeout(() => {
       const roll = Math.floor(Math.random() * 6) + 1;
       setDiceValue(roll);
       setIsRolling(false);
@@ -971,7 +1006,7 @@ export function App() {
         if (nextSixCount >= 3) {
           triggerReactionBadge(activePlayer.color, '⚠️', '3 Sixes Forfeit!');
           setConsecutiveSixes(0);
-          setTimeout(() => {
+          safeSetTimeout(() => {
             switchPlayers();
           }, 700);
           return;
@@ -985,17 +1020,17 @@ export function App() {
 
       if (movable.length === 0) {
         triggerReactionBadge(activePlayer.color, '🚫', 'No Moves');
-        setTimeout(() => {
+        safeSetTimeout(() => {
           switchPlayers();
         }, 650);
       } else if (movable.length === 1) {
-        setTimeout(() => {
+        safeSetTimeout(() => {
           executeTokenMove(movable[0], roll);
         }, 350);
       } else {
         if (activePlayer.isBot) {
           const chosen = chooseBotMove(activePlayer, playersRef.current, roll) || movable[0];
-          setTimeout(() => {
+          safeSetTimeout(() => {
             executeTokenMove(chosen, roll);
           }, 450);
         } else {
@@ -1015,6 +1050,7 @@ export function App() {
     triggerReactionBadge,
     switchPlayers,
     executeTokenMove,
+    safeSetTimeout,
   ]);
 
   // Token click handler
@@ -1068,6 +1104,30 @@ export function App() {
       });
     }
   };
+
+  // Quit Game: Exit match cleanly, stop all timers, return to menu, preserving saved session for offline
+  const handleQuitGame = useCallback(() => {
+    clearAllGameTimers();
+    if (currentGameMode === 'online_multiplayer' && onlineRoomRef.current) {
+      socketClient.leaveRoom(onlineRoomRef.current.code);
+      setOnlineRoom(null);
+    }
+    setGameState('MENU');
+    setActiveSession(storageManager.getActiveSession());
+  }, [clearAllGameTimers, currentGameMode]);
+
+  // End Game: Permanently terminate match, stop all timers, erase saved session
+  const handleEndGame = useCallback(() => {
+    clearAllGameTimers();
+    if (currentGameMode === 'online_multiplayer' && onlineRoomRef.current) {
+      socketClient.endGame(onlineRoomRef.current.code);
+      setOnlineRoom(null);
+    } else {
+      storageManager.clearActiveSession();
+      setActiveSession(null);
+    }
+    setGameState('MENU');
+  }, [clearAllGameTimers, currentGameMode]);
 
   // Reset all preferences
   const handleResetPreferences = () => {
@@ -1212,47 +1272,15 @@ export function App() {
             <span className="hidden sm:inline">Soundboard</span>
           </button>
 
-          {/* Leave Online Match / Restart Offline */}
-          {isOnlineMode ? (
-            <button
-              type="button"
-              onClick={() => {
-                if (onlineRoom) socketClient.leaveRoom(onlineRoom.code);
-                setOnlineRoom(null);
-                setGameState('MENU');
-              }}
-              className="px-2.5 py-1.5 rounded-xl bg-white/[0.06] hover:bg-red-500/20 text-[#A3A3A3] hover:text-red-300 border border-white/[0.08] transition cursor-pointer flex items-center gap-1 text-xs font-bold"
-              title="Leave Online Match"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Leave</span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() =>
-                handleStartGame(
-                  currentGameMode,
-                  players.length as 2 | 3 | 4,
-                  players.filter((p) => p.isBot).length,
-                  players.map((p) => p.name)
-                )
-              }
-              className="p-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-[#A3A3A3] hover:text-[#F5F5F5] border border-white/[0.08] transition cursor-pointer"
-              title="Restart Match"
-            >
-              <RotateCcw className="w-4 h-4" />
-            </button>
-          )}
-
-          {/* Settings Modal */}
+          {/* Game Menu (Resume / Quit / End Game / Settings) */}
           <button
             type="button"
             onClick={() => setIsSettingsOpen(true)}
-            className="p-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-[#A3A3A3] hover:text-[#F5F5F5] border border-white/[0.08] transition cursor-pointer"
-            title="Game Settings"
+            className="px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-[#F5F5F5] border border-white/[0.08] transition cursor-pointer flex items-center gap-1.5 text-xs font-bold"
+            title="Game Menu"
           >
-            <Settings className="w-4 h-4" />
+            <Menu className="w-3.5 h-3.5 text-[#E9BC42]" />
+            <span>Menu</span>
           </button>
         </div>
       </header>
@@ -1357,31 +1385,28 @@ export function App() {
         </div>
       </main>
 
-      {/* Settings Modal */}
+      {/* Game Menu Modal */}
       <MenuModal
         isOpen={isSettingsOpen}
         soundEnabled={soundEnabled}
         musicEnabled={musicEnabled}
         voiceEnabled={voiceEnabled}
+        isOnline={isOnlineMode}
+        onResume={() => setIsSettingsOpen(false)}
+        onQuitGame={handleQuitGame}
+        onEndGame={handleEndGame}
         onToggleSound={handleToggleSound}
         onToggleMusic={handleToggleMusic}
         onToggleVoice={handleToggleVoice}
         onOpenSoundboard={() => setIsSoundboardOpen(true)}
-        onRestart={() =>
+        onRestart={() => {
+          clearAllGameTimers();
           handleStartGame(
             currentGameMode,
             players.length as 2 | 3 | 4,
             players.filter((p) => p.isBot).length,
             players.map((p) => p.name)
-          )
-        }
-        onMainMenu={() => {
-          if (isOnlineMode && onlineRoom) {
-            socketClient.leaveRoom(onlineRoom.code);
-            setOnlineRoom(null);
-          }
-          setGameState('MENU');
-          setActiveSession(storageManager.getActiveSession());
+          );
         }}
         onResetPreferences={handleResetPreferences}
         onClose={() => setIsSettingsOpen(false)}
@@ -1400,6 +1425,7 @@ export function App() {
         <WinnerModal
           winners={winners}
           onPlayAgain={() => {
+            clearAllGameTimers();
             if (isOnlineMode && onlineRoom) {
               socketClient.leaveRoom(onlineRoom.code);
               setOnlineRoom(null);
@@ -1412,6 +1438,7 @@ export function App() {
             );
           }}
           onMainMenu={() => {
+            clearAllGameTimers();
             if (isOnlineMode && onlineRoom) {
               socketClient.leaveRoom(onlineRoom.code);
               setOnlineRoom(null);

@@ -1,4 +1,4 @@
-import type { PlayerColor, PositionIndex } from '../types/ludo';
+import type { PlayerColor, PositionIndex } from '../types/ludo.js';
 
 /**
  * Normalized percentage coordinates extracted from MainActivity.java (lines 79-82).

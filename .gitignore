@@ -25,3 +25,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+.vercel
+.env*
+
+# Server build artifacts
+.vercel_build_output
+dist-server

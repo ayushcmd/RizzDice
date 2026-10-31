@@ -3,6 +3,9 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "concurrently -n \"SERVER,CLIENT\" -c \"cyan,magenta\" \"npx tsx server/index.ts\" \"vite\"",
     "dev:client": "vite",

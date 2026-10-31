@@ -338,6 +338,103 @@ async function runVercelMultiplayerSuite() {
     clientA.disconnect();
     clientB.disconnect();
 
+    // -------------------------------------------------------------
+    // [8] 4-Player Match with 2 Humans and 2 Bots
+    // -------------------------------------------------------------
+    console.log('\n[8] 4-Player Match with 2 Humans and 2 Bots');
+
+    const clientC = new SocketClientManager(`RIZZ-C${runId}`, 'Charlie');
+    const clientD = new SocketClientManager(`RIZZ-D${runId}`, 'Dave');
+
+    clientC.connect(baseUrl);
+    clientD.connect(baseUrl);
+
+    await waitFor(() => clientC.isConnected && clientD.isConnected);
+
+    let room4BotCode = '';
+    clientC.on('room_created', (room: any) => {
+      room4BotCode = room.code;
+    });
+
+    clientC.createRoom(4, true);
+    await waitFor(() => room4BotCode !== '');
+
+    await it('Player C creates 4-player room with 2 bots pre-configured', () => {
+      assert.strictEqual(clientC.currentRoom?.maxPlayers, 4);
+      const seats = clientC.currentRoom?.seats || [];
+      assert.strictEqual(seats[0].playerId, `RIZZ-C${runId}`);
+      assert.strictEqual(seats[0].isBot, false);
+      assert.strictEqual(seats[1].playerId, null);
+      assert.strictEqual(seats[1].isBot, false);
+      assert.strictEqual(seats[2].playerId, 'BOT-CHAD');
+      assert.strictEqual(seats[2].isBot, true);
+      assert.strictEqual(seats[3].playerId, 'BOT-GIGA');
+      assert.strictEqual(seats[3].isBot, true);
+    });
+
+    // Player D joins the only available human seat
+    let joinedD = false;
+    clientD.on('room_joined', () => {
+      joinedD = true;
+    });
+
+    clientD.joinRoom(room4BotCode);
+    await waitFor(() => joinedD);
+
+    await it('Player D joins open human slot 1 and bot slots remain occupied by bots', () => {
+      assert.strictEqual(clientD.currentRoom?.seats[1].playerId, `RIZZ-D${runId}`);
+      assert.strictEqual(clientD.currentRoom?.seats[2].playerId, 'BOT-CHAD');
+      assert.strictEqual(clientD.currentRoom?.seats[3].playerId, 'BOT-GIGA');
+    });
+
+    // Player D readies up
+    clientD.toggleReady(room4BotCode);
+    await waitFor(() => clientC.currentRoom?.seats[1].isReady === true);
+
+    // Player C starts the 4-player match with 2 humans and 2 bots
+    let matchStarted4 = false;
+    clientC.on('game_started', () => {
+      matchStarted4 = true;
+    });
+    clientD.on('game_started', () => {
+      matchStarted4 = true;
+    });
+
+    clientC.startMatch(room4BotCode);
+    await waitFor(() => matchStarted4);
+
+    await it('Match starts with exactly 2 humans and 2 bots correctly configured in game engine', () => {
+      const match = clientC.currentMatch;
+      assert.ok(match !== null);
+      assert.strictEqual(match?.players.length, 4);
+      assert.strictEqual(match?.players[0].isBot, false);
+      assert.strictEqual(match?.players[1].isBot, false);
+      assert.strictEqual(match?.players[2].isBot, true);
+      assert.strictEqual(match?.players[3].isBot, true);
+    });
+
+    // -------------------------------------------------------------
+    // [9] End Game Action & Room Cleanup
+    // -------------------------------------------------------------
+    console.log('\n[9] End Game Action & Clean Room Deletion');
+
+    let gameEndedD = false;
+    clientD.on('game_ended', () => {
+      gameEndedD = true;
+    });
+
+    clientC.endGame(room4BotCode);
+    await waitFor(() => gameEndedD);
+
+    await it('Host ends game; all players receive game_ended and room is deleted', () => {
+      assert.strictEqual(gameEndedD, true);
+      assert.strictEqual(clientC.currentRoom, null);
+      assert.strictEqual(clientD.currentRoom, null);
+    });
+
+    clientC.disconnect();
+    clientD.disconnect();
+
   } finally {
     testServer.closeAllConnections?.();
     await new Promise<void>((resolve) => testServer.close(() => resolve()));

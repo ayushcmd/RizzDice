@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { redisMultiplayer, redisStore } from '../server/redisClient';
-import { LudoEngine } from '../server/ludoEngine';
+import { redisMultiplayer, redisStore } from '../server/redisClient.js';
+import { LudoEngine } from '../server/ludoEngine.js';
+import { chooseBotMove } from '../src/utils/botAI.js';
 import type {
   OnlinePlayer,
   PlayerPresenceStatus,
@@ -10,8 +11,8 @@ import type {
   RoomSeat,
   GameInvitation,
   OnlineMatchState,
-} from '../src/types/multiplayer';
-import type { PlayerColor } from '../src/types/ludo';
+} from '../src/types/multiplayer.js';
+import type { PlayerColor } from '../src/types/ludo.js';
 
 export interface VercelMultiplayerEvent {
   id: number;
@@ -89,6 +90,96 @@ function sendJson(res: ServerResponse & { status?: (code: number) => ServerRespo
     res.json(data);
   } else {
     res.end(JSON.stringify(data));
+  }
+}
+
+async function stepBotTurnsIfNeeded(roomCode: string, maxSteps = 1): Promise<OnlineMatchState | null> {
+  const lockKey = `rizz:botlock:${roomCode}`;
+  const lock = await redisStore.set(lockKey, '1', 'EX', 3, 'NX');
+  if (lock !== 'OK') {
+    return await redisMultiplayer.getMatch(roomCode);
+  }
+
+  try {
+    const room = await redisMultiplayer.getRoom(roomCode);
+    let match = await redisMultiplayer.getMatch(roomCode);
+    if (!room || !match || room.status !== 'IN_MATCH') {
+      return match;
+    }
+
+    let steps = 0;
+    while (steps < maxSteps) {
+      const activePlayer = match.players[match.activePlayerIndex];
+      if (!activePlayer || !activePlayer.isBot || activePlayer.hasWon) {
+        break;
+      }
+      steps++;
+
+      // 1. Roll dice if canRoll
+      if (match.canRoll) {
+        const botIndex = match.activePlayerIndex;
+        const rollResult = LudoEngine.rollDice(match, botIndex);
+        const payload = {
+          diceValue: rollResult.diceValue,
+          activePlayerIndex: botIndex,
+          consecutiveSixes: rollResult.consecutiveSixes,
+          selectableTokenIds: rollResult.selectableTokenIds,
+          isThreeSixes: rollResult.isThreeSixes,
+          autoPassTurn: rollResult.autoPassTurn,
+          match,
+        };
+        await redisMultiplayer.pushRoomEvent(match.roomCode, 'game:dice_rolled', payload);
+
+        if (rollResult.autoPassTurn) {
+          await redisMultiplayer.saveMatch(match.roomCode, match);
+          await redisMultiplayer.touchRoom(match.roomCode);
+          continue;
+        }
+      }
+
+      // 2. Select token to move
+      if (!match.canRoll && match.selectableTokenIds.length > 0) {
+        const chosen = chooseBotMove(activePlayer, match.players, match.diceValue);
+        const chosenTokenId = chosen ? chosen.id : match.selectableTokenIds[0];
+
+        const prevIndex = match.activePlayerIndex;
+        const moveResult = LudoEngine.moveToken(match, prevIndex, chosenTokenId);
+        const payload = {
+          tokenId: chosenTokenId,
+          playerIndex: prevIndex,
+          stepSequence: moveResult.stepSequence,
+          isSpawning: moveResult.isSpawning,
+          capturedToken: moveResult.capturedToken,
+          playerWon: moveResult.playerWon,
+          isGameOver: moveResult.isGameOver,
+          extraChance: moveResult.extraChance,
+          nextPlayerIndex: moveResult.nextPlayerIndex,
+          match,
+        };
+        await redisMultiplayer.pushRoomEvent(match.roomCode, 'game:token_moved', payload);
+
+        if (moveResult.isGameOver) {
+          room.status = 'FINISHED';
+          await redisMultiplayer.saveRoom(room);
+          await redisMultiplayer.pushRoomEvent(match.roomCode, 'game:over', {
+            winners: match.winners,
+            match,
+          });
+          await redisMultiplayer.saveMatch(match.roomCode, match);
+          await redisMultiplayer.touchRoom(match.roomCode);
+          break;
+        }
+
+        await redisMultiplayer.saveMatch(match.roomCode, match);
+        await redisMultiplayer.touchRoom(match.roomCode);
+      } else {
+        break;
+      }
+    }
+
+    return match;
+  } finally {
+    await redisStore.del(lockKey);
   }
 }
 
@@ -379,6 +470,7 @@ export default async function handler(
       }
 
       const maxPlayers = ((body.maxPlayers as number) || 4) as 2 | 3 | 4;
+      const withBots = Boolean(body.withBots);
       const roomCode = generateRoomCode();
 
       const colorsForCount: Record<number, PlayerColor[]> = {
@@ -388,15 +480,30 @@ export default async function handler(
       };
 
       const assignedColors = colorsForCount[maxPlayers];
-      const seats: RoomSeat[] = assignedColors.map((color, idx) => ({
-        slot: idx,
-        color,
-        playerId: idx === 0 ? playerId : null,
-        playerName: idx === 0 ? player.name : null,
-        isReady: idx === 0,
-        isHost: idx === 0,
-        isConnected: true,
-      }));
+      const seats: RoomSeat[] = assignedColors.map((color, idx) => {
+        if (maxPlayers === 4 && withBots && (idx === 2 || idx === 3)) {
+          return {
+            slot: idx,
+            color,
+            playerId: idx === 2 ? 'BOT-CHAD' : 'BOT-GIGA',
+            playerName: idx === 2 ? 'Chad (Bot)' : 'Giga (Bot)',
+            isReady: true,
+            isHost: false,
+            isConnected: true,
+            isBot: true,
+          };
+        }
+        return {
+          slot: idx,
+          color,
+          playerId: idx === 0 ? playerId : null,
+          playerName: idx === 0 ? player.name : null,
+          isReady: idx === 0,
+          isHost: idx === 0,
+          isConnected: true,
+          isBot: false,
+        };
+      });
 
       const room: MultiplayerRoom = {
         code: roomCode,
@@ -412,6 +519,74 @@ export default async function handler(
       await redisMultiplayer.pushRoomEvent(roomCode, 'room:created', { room });
       const eventId = await redisMultiplayer.pushRoomEvent(roomCode, 'room:updated', { room });
 
+      sendJson(res, 200, { success: true, eventId, room });
+      return;
+    }
+
+    if (action === 'toggle_bots') {
+      const playerId = body.playerId as string;
+      const roomCode = ((body.roomCode as string) || '').trim().toUpperCase();
+      const room = await redisMultiplayer.getRoom(roomCode);
+
+      if (!room || room.hostId !== playerId) {
+        sendJson(res, 403, { error: 'Only room host can configure bots.' });
+        return;
+      }
+
+      if (room.status !== 'WAITING' || room.maxPlayers !== 4) {
+        sendJson(res, 400, { error: 'Bots can only be configured in a waiting 4-player room.' });
+        return;
+      }
+
+      const hasBots = room.seats.some((s) => s.isBot);
+      if (hasBots) {
+        room.seats = room.seats.map((seat, idx) => {
+          if (seat.isBot) {
+            return {
+              slot: idx,
+              color: seat.color,
+              playerId: null,
+              playerName: null,
+              isReady: false,
+              isHost: false,
+              isConnected: false,
+              isBot: false,
+            };
+          }
+          return seat;
+        });
+      } else {
+        room.seats = room.seats.map((seat, idx) => {
+          if (idx === 2 && (!seat.playerId || seat.isBot)) {
+            return {
+              slot: idx,
+              color: seat.color,
+              playerId: 'BOT-CHAD',
+              playerName: 'Chad (Bot)',
+              isReady: true,
+              isHost: false,
+              isConnected: true,
+              isBot: true,
+            };
+          }
+          if (idx === 3 && (!seat.playerId || seat.isBot)) {
+            return {
+              slot: idx,
+              color: seat.color,
+              playerId: 'BOT-GIGA',
+              playerName: 'Giga (Bot)',
+              isReady: true,
+              isHost: false,
+              isConnected: true,
+              isBot: true,
+            };
+          }
+          return seat;
+        });
+      }
+
+      await redisMultiplayer.saveRoom(room);
+      const eventId = await redisMultiplayer.pushRoomEvent(room.code, 'room:updated', { room });
       sendJson(res, 200, { success: true, eventId, room });
       return;
     }
@@ -442,7 +617,7 @@ export default async function handler(
         return;
       }
 
-      const emptySeat = room.seats.find((s) => s.playerId === null);
+      const emptySeat = room.seats.find((s) => s.playerId === null && !s.isBot);
       if (!emptySeat) {
         sendJson(res, 400, { error: 'Room is already full.' });
         return;
@@ -499,41 +674,116 @@ export default async function handler(
       const room = await redisMultiplayer.getRoom(roomCode);
 
       if (room) {
+        const isMatchActive = room.status === 'IN_MATCH';
         const isHost = room.hostId === playerId;
-        if (isHost) {
-          const otherPlayerSeat = room.seats.find((s) => s.playerId && s.playerId !== playerId);
-          if (otherPlayerSeat && otherPlayerSeat.playerId) {
-            room.hostId = otherPlayerSeat.playerId;
-            otherPlayerSeat.isHost = true;
-            otherPlayerSeat.isReady = true;
+        const mySeat = room.seats.find((s) => s.playerId === playerId);
+        const leavingPlayerName = mySeat?.playerName || 'Player';
 
-            const hostSeat = room.seats.find((s) => s.playerId === playerId);
-            if (hostSeat) {
-              hostSeat.playerId = null;
-              hostSeat.playerName = null;
-              hostSeat.isReady = false;
-              hostSeat.isHost = false;
+        if (isMatchActive) {
+          if (mySeat) {
+            mySeat.playerId = null;
+            mySeat.playerName = null;
+            mySeat.isConnected = false;
+            mySeat.isReady = false;
+          }
+
+          const remainingHumans = room.seats.filter((s) => s.playerId !== null && !s.isBot);
+          await redisMultiplayer.pushRoomEvent(room.code, 'player:forfeited', {
+            playerName: leavingPlayerName,
+          });
+
+          if (remainingHumans.length === 0) {
+            room.status = 'FINISHED';
+            await redisMultiplayer.deleteMatch(room.code);
+        await redisMultiplayer.deleteRoom(room.code);
+            await redisMultiplayer.deleteRoom(room.code);
+            await redisMultiplayer.pushRoomEvent(room.code, 'room:closed', { reason: 'All human players have left.' });
+          } else {
+            if (isHost && remainingHumans[0].playerId) {
+              room.hostId = remainingHumans[0].playerId;
+              remainingHumans[0].isHost = true;
             }
             await redisMultiplayer.saveRoom(room);
             await redisMultiplayer.pushRoomEvent(room.code, 'room:updated', { room });
-          } else {
-            await redisMultiplayer.deleteRoom(room.code);
-            await redisMultiplayer.pushRoomEvent(room.code, 'room:closed', { reason: 'Host has closed the room.' });
+
+            const match = await redisMultiplayer.getMatch(room.code);
+            if (match && mySeat && match.activePlayerIndex === mySeat.slot) {
+              const nextIdx = LudoEngine.getNextActivePlayerIndex(match.players, match.activePlayerIndex);
+              match.activePlayerIndex = nextIdx;
+              match.canRoll = true;
+              match.selectableTokenIds = [];
+              await redisMultiplayer.saveMatch(room.code, match);
+              await redisMultiplayer.pushRoomEvent(room.code, 'game:sync', { match });
+              if (match.players[nextIdx]?.isBot) {
+                await stepBotTurnsIfNeeded(room.code);
+              }
+            }
           }
         } else {
-          const seat = room.seats.find((s) => s.playerId === playerId);
-          if (seat) {
-            seat.playerId = null;
-            seat.playerName = null;
-            seat.isReady = false;
-            seat.isConnected = false;
-            await redisMultiplayer.saveRoom(room);
-            await redisMultiplayer.pushRoomEvent(room.code, 'room:updated', { room });
+          if (isHost) {
+            const otherPlayerSeat = room.seats.find((s) => s.playerId && s.playerId !== playerId && !s.isBot);
+            if (otherPlayerSeat && otherPlayerSeat.playerId) {
+              room.hostId = otherPlayerSeat.playerId;
+              otherPlayerSeat.isHost = true;
+              otherPlayerSeat.isReady = true;
+
+              const hostSeat = room.seats.find((s) => s.playerId === playerId);
+              if (hostSeat) {
+                hostSeat.playerId = null;
+                hostSeat.playerName = null;
+                hostSeat.isReady = false;
+                hostSeat.isHost = false;
+              }
+              await redisMultiplayer.saveRoom(room);
+              await redisMultiplayer.pushRoomEvent(room.code, 'room:updated', { room });
+            } else {
+              await redisMultiplayer.deleteRoom(room.code);
+              await redisMultiplayer.pushRoomEvent(room.code, 'room:closed', { reason: 'Host has closed the room.' });
+            }
+          } else {
+            const seat = room.seats.find((s) => s.playerId === playerId);
+            if (seat) {
+              seat.playerId = null;
+              seat.playerName = null;
+              seat.isReady = false;
+              seat.isConnected = false;
+              await redisMultiplayer.saveRoom(room);
+              await redisMultiplayer.pushRoomEvent(room.code, 'room:updated', { room });
+            }
           }
         }
       }
 
       await redisMultiplayer.updatePlayerStatus(playerId, 'AVAILABLE');
+      sendJson(res, 200, { success: true });
+      return;
+    }
+
+    if (action === 'end_game') {
+      const playerId = body.playerId as string;
+      const roomCode = ((body.roomCode as string) || '').trim().toUpperCase();
+      const room = await redisMultiplayer.getRoom(roomCode);
+
+      if (room) {
+        room.status = 'FINISHED';
+        await redisMultiplayer.saveRoom(room);
+        await redisMultiplayer.pushRoomEvent(room.code, 'game:ended', {
+          endedBy: playerId,
+          reason: 'Match was ended.',
+        });
+        await redisMultiplayer.pushRoomEvent(room.code, 'room:closed', {
+          reason: 'Match has ended.',
+        });
+        await redisMultiplayer.deleteMatch(room.code);
+        await redisMultiplayer.deleteRoom(room.code);
+
+        for (const seat of room.seats) {
+          if (seat.playerId && !seat.isBot) {
+            await redisMultiplayer.updatePlayerStatus(seat.playerId, 'AVAILABLE');
+          }
+        }
+      }
+
       sendJson(res, 200, { success: true });
       return;
     }
@@ -557,6 +807,12 @@ export default async function handler(
         return;
       }
 
+      const humanSeats = occupiedSeats.filter((s) => !s.isBot);
+      if (humanSeats.length < 1) {
+        sendJson(res, 400, { error: 'At least 1 human player must be in the room.' });
+        return;
+      }
+
       const notReady = occupiedSeats.filter((s) => !s.isReady);
       if (notReady.length > 0) {
         sendJson(res, 400, { error: 'All joined players must be Ready to start.' });
@@ -570,12 +826,16 @@ export default async function handler(
       await redisMultiplayer.saveMatch(room.code, matchState);
 
       for (const seat of occupiedSeats) {
-        if (seat.playerId) {
+        if (seat.playerId && !seat.isBot) {
           await redisMultiplayer.updatePlayerStatus(seat.playerId, 'IN_GAME', room.code);
         }
       }
 
       const eventId = await redisMultiplayer.pushRoomEvent(room.code, 'game:started', { match: matchState, room });
+
+      if (matchState.players[matchState.activePlayerIndex]?.isBot) {
+        await stepBotTurnsIfNeeded(room.code);
+      }
 
       sendJson(res, 200, { success: true, eventId, match: matchState, room });
       return;
@@ -615,6 +875,10 @@ export default async function handler(
         };
 
         const eventId = await redisMultiplayer.pushRoomEvent(match.roomCode, 'game:dice_rolled', payload);
+
+        if (result.autoPassTurn && match.players[match.activePlayerIndex]?.isBot) {
+          await stepBotTurnsIfNeeded(match.roomCode);
+        }
 
         sendJson(res, 200, { success: true, eventId, ...payload });
       } catch (err: unknown) {
@@ -670,6 +934,8 @@ export default async function handler(
             winners: match.winners,
             match,
           });
+        } else if (match.players[match.activePlayerIndex]?.isBot) {
+          await stepBotTurnsIfNeeded(match.roomCode);
         }
 
         sendJson(res, 200, { success: true, eventId, ...payload });
@@ -713,6 +979,13 @@ export default async function handler(
       let lastEventId = since;
 
       if (roomCode) {
+        const room = await redisMultiplayer.getRoom(roomCode);
+        if (room && room.status === 'IN_MATCH') {
+          const match = await redisMultiplayer.getMatch(roomCode);
+          if (match && match.players[match.activePlayerIndex]?.isBot) {
+            await stepBotTurnsIfNeeded(roomCode);
+          }
+        }
         events = (await redisMultiplayer.getRoomEventsSince(roomCode, since)) as VercelMultiplayerEvent[];
         if (events.length > 0) {
           lastEventId = events[events.length - 1].id;

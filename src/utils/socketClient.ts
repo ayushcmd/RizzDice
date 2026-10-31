@@ -302,7 +302,9 @@ export class SocketClientManager {
         break;
 
       case 'room:updated':
-        this.currentRoom = data.room;
+        if (this.currentRoom) {
+          this.currentRoom = data.room;
+        }
         this.emitInternal('room_updated', data.room);
         break;
 
@@ -312,13 +314,22 @@ export class SocketClientManager {
         this.emitInternal('room_closed', data);
         break;
 
+      case 'game:ended':
+        this.currentRoom = null;
+        this.currentMatch = null;
+        this.emitInternal('game_ended', data);
+        this.emitInternal('room_closed', data);
+        break;
+
       case 'room:error':
         this.emitInternal('room_error', data.message);
         break;
 
       case 'game:started':
-        this.currentMatch = data.match;
-        this.currentRoom = data.room;
+        if (this.currentRoom) {
+          this.currentMatch = data.match;
+          this.currentRoom = data.room;
+        }
         this.emitInternal('game_started', data);
         break;
 
@@ -495,8 +506,8 @@ export class SocketClientManager {
     this.emitInternal('invite_cleared');
   }
 
-  public createRoom(maxPlayers: 2 | 3 | 4) {
-    this.postAction('create_room', { playerId: this.playerId, maxPlayers }).then((res) => {
+  public createRoom(maxPlayers: 2 | 3 | 4, withBots = false) {
+    this.postAction('create_room', { playerId: this.playerId, maxPlayers, withBots }).then((res) => {
       if (res.success && res.room) {
         if (res.eventId) {
           this.processedEventIds.add(res.eventId);
@@ -550,6 +561,31 @@ export class SocketClientManager {
     this.currentMatch = null;
     this.emitInternal('room_left');
     this.scheduleNextPoll(500);
+  }
+
+  public endGame(roomCode: string) {
+    this.currentRoom = null;
+    this.currentMatch = null;
+    this.emitInternal('game_ended', { reason: 'You ended the match.' });
+    this.emitInternal('room_closed', { reason: 'Match has ended.' });
+    this.postAction('end_game', { playerId: this.playerId, roomCode });
+    this.scheduleNextPoll(500);
+  }
+
+  public toggleBots(roomCode: string) {
+    return this.postAction('toggle_bots', { playerId: this.playerId, roomCode }).then((res) => {
+      if (res.success && res.room) {
+        if (res.eventId) {
+          this.processedEventIds.add(res.eventId);
+          this.lastEventId = Math.max(this.lastEventId, res.eventId);
+        }
+        this.currentRoom = res.room;
+        this.emitInternal('room_updated', res.room);
+      } else {
+        this.emitInternal('room_error', res.error || 'Failed to toggle bots.');
+      }
+      return res;
+    });
   }
 
   public startMatch(roomCode: string) {

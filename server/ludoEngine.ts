@@ -1,7 +1,7 @@
-import type { Player, Token, PlayerColor, PositionIndex, WinnerRecord } from '../src/types/ludo';
-import type { MultiplayerRoom, OnlineMatchState } from '../src/types/multiplayer';
-import { SAFE_SPOTS } from '../src/utils/boardData';
-import { canTokenMove, calculateTokenMovement, type IntermediateStep } from '../src/utils/botAI';
+import type { Player, Token, PlayerColor, PositionIndex, WinnerRecord } from '../src/types/ludo.js';
+import type { MultiplayerRoom, OnlineMatchState } from '../src/types/multiplayer.js';
+import { SAFE_SPOTS } from '../src/utils/boardData.js';
+import { canTokenMove, calculateTokenMovement, type IntermediateStep } from '../src/utils/botAI.js';
 
 export function createPlayerInstance(
   id: number,
@@ -41,24 +41,24 @@ export class LudoEngine {
     if (count === 2) {
       const redSeat = room.seats.find((s) => s.color === 'red') || room.seats[0];
       const yellowSeat = room.seats.find((s) => s.color === 'yellow') || room.seats[1];
-      players.push(createPlayerInstance(0, redSeat.playerName || 'Rizzler', 'red', 1));
-      players.push(createPlayerInstance(1, yellowSeat.playerName || 'Chad', 'yellow', 4));
+      players.push(createPlayerInstance(0, redSeat.playerName || 'Rizzler', 'red', 1, Boolean(redSeat.isBot)));
+      players.push(createPlayerInstance(1, yellowSeat.playerName || 'Chad', 'yellow', 4, Boolean(yellowSeat.isBot)));
     } else if (count === 3) {
       const redSeat = room.seats.find((s) => s.color === 'red') || room.seats[0];
       const greenSeat = room.seats.find((s) => s.color === 'green') || room.seats[1];
       const yellowSeat = room.seats.find((s) => s.color === 'yellow') || room.seats[2];
-      players.push(createPlayerInstance(0, redSeat.playerName || 'Rizzler', 'red', 1));
-      players.push(createPlayerInstance(1, greenSeat.playerName || 'Sigma', 'green', 2));
-      players.push(createPlayerInstance(2, yellowSeat.playerName || 'Chad', 'yellow', 4));
+      players.push(createPlayerInstance(0, redSeat.playerName || 'Rizzler', 'red', 1, Boolean(redSeat.isBot)));
+      players.push(createPlayerInstance(1, greenSeat.playerName || 'Sigma', 'green', 2, Boolean(greenSeat.isBot)));
+      players.push(createPlayerInstance(2, yellowSeat.playerName || 'Chad', 'yellow', 4, Boolean(yellowSeat.isBot)));
     } else {
       const redSeat = room.seats.find((s) => s.color === 'red') || room.seats[0];
       const greenSeat = room.seats.find((s) => s.color === 'green') || room.seats[1];
       const yellowSeat = room.seats.find((s) => s.color === 'yellow') || room.seats[2];
       const blueSeat = room.seats.find((s) => s.color === 'blue') || room.seats[3];
-      players.push(createPlayerInstance(0, redSeat.playerName || 'Rizzler', 'red', 1));
-      players.push(createPlayerInstance(1, greenSeat.playerName || 'Sigma', 'green', 2));
-      players.push(createPlayerInstance(2, yellowSeat.playerName || 'Chad', 'yellow', 4));
-      players.push(createPlayerInstance(3, blueSeat.playerName || 'Giga', 'blue', 3));
+      players.push(createPlayerInstance(0, redSeat.playerName || 'Rizzler', 'red', 1, Boolean(redSeat.isBot)));
+      players.push(createPlayerInstance(1, greenSeat.playerName || 'Sigma', 'green', 2, Boolean(greenSeat.isBot)));
+      players.push(createPlayerInstance(2, yellowSeat.playerName || 'Chad', 'yellow', 4, Boolean(yellowSeat.isBot)));
+      players.push(createPlayerInstance(3, blueSeat.playerName || 'Giga', 'blue', 3, Boolean(blueSeat.isBot)));
     }
 
     return {

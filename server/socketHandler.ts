@@ -1,5 +1,5 @@
 import { Server, Socket } from 'socket.io';
-import { redisMultiplayer, redisStore } from './redisClient';
+import { redisMultiplayer, redisStore } from './redisClient.js';
 import { LudoEngine } from './ludoEngine';
 import type {
   OnlinePlayer,
