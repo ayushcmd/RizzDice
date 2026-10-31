@@ -46,6 +46,8 @@ export class SocketClientManager {
   private pollTimeout: ReturnType<typeof setTimeout> | null = null;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private isDestroyed = false;
+  private isPollingActive = false;
+  private boundVisibilityHandler: (() => void) | null = null;
   private lastEventId = 0;
   private processedEventIds = new Set<number>();
   private processedInboxIds = new Set<number>();
@@ -139,6 +141,15 @@ export class SocketClientManager {
     }
     this.isDestroyed = false;
 
+    if (typeof document !== 'undefined' && !this.boundVisibilityHandler) {
+      this.boundVisibilityHandler = () => {
+        if (!document.hidden && this.isConnected && !this.isDestroyed) {
+          this.scheduleNextPoll(50);
+        }
+      };
+      document.addEventListener('visibilitychange', this.boundVisibilityHandler);
+    }
+
     // Call init on Vercel Serverless Function
     this.postAction('init', {
       playerId: this.playerId,
@@ -178,6 +189,7 @@ export class SocketClientManager {
   public disconnect() {
     this.isDestroyed = true;
     this.isConnected = false;
+    this.isPollingActive = false;
     if (this.pollTimeout) {
       clearTimeout(this.pollTimeout);
       this.pollTimeout = null;
@@ -185,6 +197,10 @@ export class SocketClientManager {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
+    }
+    if (typeof document !== 'undefined' && this.boundVisibilityHandler) {
+      document.removeEventListener('visibilitychange', this.boundVisibilityHandler);
+      this.boundVisibilityHandler = null;
     }
     this.emitInternal('connection_change', false);
   }
@@ -215,8 +231,10 @@ export class SocketClientManager {
 
     let delay = delayMs;
     if (delay === undefined) {
-      if (this.currentMatch) {
-        delay = 500; // In match: fast response
+      if (typeof document !== 'undefined' && document.hidden) {
+        delay = 3000; // Background tab: throttle polling
+      } else if (this.currentMatch) {
+        delay = 250; // In match: 250ms ultra-fast response
       } else if (this.currentRoom) {
         delay = 800; // In waiting room: moderate
       } else {
@@ -230,7 +248,8 @@ export class SocketClientManager {
   }
 
   private async executePoll() {
-    if (this.isDestroyed || !this.isConnected) return;
+    if (this.isDestroyed || !this.isConnected || this.isPollingActive) return;
+    this.isPollingActive = true;
 
     try {
       const roomCode = this.currentRoom?.code || '';
@@ -239,6 +258,11 @@ export class SocketClientManager {
         roomCode,
         since: this.lastEventId,
       });
+
+      // Guard against stale response if user switched/left room while poll was in-flight
+      if (roomCode && this.currentRoom?.code !== roomCode) {
+        return;
+      }
 
       if (res.success) {
         // 1. Process room events
@@ -283,6 +307,7 @@ export class SocketClientManager {
     } catch (e) {
       console.warn('[Multiplayer Poll Exception]:', e);
     } finally {
+      this.isPollingActive = false;
       this.scheduleNextPoll();
     }
   }
@@ -311,12 +336,16 @@ export class SocketClientManager {
       case 'room:closed':
         this.currentRoom = null;
         this.currentMatch = null;
+        this.lastEventId = 0;
+        this.processedEventIds.clear();
         this.emitInternal('room_closed', data);
         break;
 
       case 'game:ended':
         this.currentRoom = null;
         this.currentMatch = null;
+        this.lastEventId = 0;
+        this.processedEventIds.clear();
         this.emitInternal('game_ended', data);
         this.emitInternal('room_closed', data);
         break;
@@ -559,6 +588,8 @@ export class SocketClientManager {
     this.postAction('leave_room', { playerId: this.playerId, roomCode });
     this.currentRoom = null;
     this.currentMatch = null;
+    this.lastEventId = 0;
+    this.processedEventIds.clear();
     this.emitInternal('room_left');
     this.scheduleNextPoll(500);
   }
@@ -566,6 +597,8 @@ export class SocketClientManager {
   public endGame(roomCode: string) {
     this.currentRoom = null;
     this.currentMatch = null;
+    this.lastEventId = 0;
+    this.processedEventIds.clear();
     this.emitInternal('game_ended', { reason: 'You ended the match.' });
     this.emitInternal('room_closed', { reason: 'Match has ended.' });
     this.postAction('end_game', { playerId: this.playerId, roomCode });
@@ -614,7 +647,7 @@ export class SocketClientManager {
         }
         this.currentMatch = res.match;
         this.emitInternal('game_dice_rolled', res);
-        this.scheduleNextPoll(100);
+        this.scheduleNextPoll(50);
       } else {
         this.emitInternal('game_error', res.error || 'Failed to roll dice.');
       }
@@ -633,7 +666,7 @@ export class SocketClientManager {
         if (res.isGameOver) {
           this.emitInternal('game_over', { winners: res.match.winners, match: res.match });
         }
-        this.scheduleNextPoll(100);
+        this.scheduleNextPoll(50);
       } else {
         this.emitInternal('game_error', res.error || 'Failed to move token.');
       }

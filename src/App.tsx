@@ -809,10 +809,18 @@ export function App() {
         match: OnlineMatchState;
       };
 
-      sounds.play('diceroll');
-      setIsRolling(true);
-      setCanRoll(false);
+      const myId = socketClient.getPlayerId();
+      const mySeat = onlineRoomRef.current?.seats.find((s) => s.playerId === myId);
+      const isMyRoll = mySeat?.slot === d.activePlayerIndex;
 
+      // If opponent rolled, play sound and trigger rolling animation
+      if (!isMyRoll) {
+        sounds.play('diceroll');
+        setIsRolling(true);
+        setCanRoll(false);
+      }
+
+      // Settle the dice on authoritative value
       safeSetTimeout(() => {
         setIsRolling(false);
         setDiceValue(d.diceValue);
@@ -832,30 +840,38 @@ export function App() {
             triggerReactionBadge(currP.color, '🚫', 'No Moves');
           }
           setActivePlayerIndex(d.match.activePlayerIndex);
-          const myId = socketClient.getPlayerId();
-          const mySeat = onlineRoomRef.current?.seats.find((s) => s.playerId === myId);
-          setCanRoll(mySeat?.slot === d.match.activePlayerIndex);
+          const currentSeat = onlineRoomRef.current?.seats.find((s) => s.playerId === myId);
+          setCanRoll(currentSeat?.slot === d.match.activePlayerIndex);
+          isTurnProcessingRef.current = false;
         } else {
           // Tokens selectable
-          const myId = socketClient.getPlayerId();
-          const mySeat = onlineRoomRef.current?.seats.find((s) => s.playerId === myId);
-          if (mySeat?.slot === d.activePlayerIndex) {
+          if (isMyRoll) {
             const activeTokens = currP?.tokens || [];
             const selectable = activeTokens.filter((t) => d.selectableTokenIds.includes(t.id));
             setSelectableTokens(selectable);
             // If only 1 move and it's mine, auto-execute
             if (selectable.length === 1 && onlineRoomRef.current) {
               safeSetTimeout(() => {
-                if (onlineRoomRef.current && !isTurnProcessingRef.current) {
+                if (onlineRoomRef.current) {
                   isTurnProcessingRef.current = true;
                   setSelectableTokens([]);
                   socketClient.moveToken(onlineRoomRef.current.code, selectable[0].id);
                 }
-              }, 400);
+              }, 300);
+            } else {
+              isTurnProcessingRef.current = false;
             }
           }
         }
-      }, 350);
+      }, isMyRoll ? 150 : 350);
+    });
+
+    const unsubGameError = socketClient.on('game_error', () => {
+      setIsRolling(false);
+      const myId = socketClient.getPlayerId();
+      const mySeat = onlineRoomRef.current?.seats.find((s) => s.playerId === myId);
+      setCanRoll(mySeat?.slot === activePlayerIndexRef.current);
+      isTurnProcessingRef.current = false;
     });
 
     const unsubTokenMoved = socketClient.on('game_token_moved', (data: unknown) => {
@@ -971,6 +987,7 @@ export function App() {
       unsubForfeited();
       unsubRoomClosed();
       unsubGameEnded();
+      unsubGameError();
     };
   }, [triggerReactionBadge, executeOnlineTokenStepMovement, clearAllGameTimers]);
 
@@ -978,13 +995,31 @@ export function App() {
   const handleRollDice = useCallback(() => {
     if (!canRoll || isRolling || !activePlayer || isTurnProcessingRef.current) return;
 
-    // Online Multiplayer: Server Authoritative
+    // Online Multiplayer: Server Authoritative with Immediate Optimistic Feedback
     if (currentGameMode === 'online_multiplayer') {
       if (!onlineRoom) return;
       const myId = socketClient.getPlayerId();
       const mySeat = onlineRoom.seats.find((s) => s.playerId === myId);
       if (!mySeat || mySeat.slot !== activePlayerIndex) return;
 
+      // 1. Immediate tactile local feedback: sound + spin + lock button
+      sounds.play('diceroll');
+      setIsRolling(true);
+      setCanRoll(false);
+      setSelectableTokens([]);
+      isTurnProcessingRef.current = true;
+
+      // 2. Safety watchdog timeout: prevent permanent UI freeze on network failure
+      safeSetTimeout(() => {
+        if (isTurnProcessingRef.current && isRolling) {
+          setIsRolling(false);
+          const currentSeat = onlineRoomRef.current?.seats.find((s) => s.playerId === socketClient.getPlayerId());
+          setCanRoll(currentSeat?.slot === activePlayerIndexRef.current);
+          isTurnProcessingRef.current = false;
+        }
+      }, 7000);
+
+      // 3. Dispatch authoritative roll to server
       socketClient.rollDice(onlineRoom.code);
       return;
     }

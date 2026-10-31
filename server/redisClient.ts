@@ -617,10 +617,24 @@ export const redisMultiplayer = {
       data,
       timestamp: Date.now(),
     });
-    await redisStore.rpush(eventsKey, eventItem);
-    await redisStore.ltrim(eventsKey, -50, -1); // Keep last 50 events
-    await redisStore.expire(counterKey, TTL_ROOM_SECONDS);
-    await redisStore.expire(eventsKey, TTL_ROOM_SECONDS);
+
+    if (activeRedisInstance && isRealRedis) {
+      await activeRedisInstance
+        .pipeline()
+        .rpush(eventsKey, eventItem)
+        .ltrim(eventsKey, -50, -1)
+        .expire(counterKey, TTL_ROOM_SECONDS)
+        .expire(eventsKey, TTL_ROOM_SECONDS)
+        .exec();
+    } else {
+      await Promise.all([
+        redisStore.rpush(eventsKey, eventItem),
+        redisStore.ltrim(eventsKey, -50, -1),
+        redisStore.expire(counterKey, TTL_ROOM_SECONDS),
+        redisStore.expire(eventsKey, TTL_ROOM_SECONDS),
+      ]);
+    }
+
     return seq;
   },
 
@@ -650,9 +664,20 @@ export const redisMultiplayer = {
       data,
       timestamp: Date.now(),
     });
-    await redisStore.rpush(key, item);
-    await redisStore.ltrim(key, -20, -1);
-    await redisStore.expire(key, 300); // 5 minutes TTL
+    if (activeRedisInstance && isRealRedis) {
+      await activeRedisInstance
+        .pipeline()
+        .rpush(key, item)
+        .ltrim(key, -20, -1)
+        .expire(key, 300)
+        .exec();
+    } else {
+      await Promise.all([
+        redisStore.rpush(key, item),
+        redisStore.ltrim(key, -20, -1),
+        redisStore.expire(key, 300),
+      ]);
+    }
   },
 
   async getPlayerInbox(

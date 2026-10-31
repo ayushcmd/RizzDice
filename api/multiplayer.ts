@@ -845,8 +845,10 @@ export default async function handler(
       const playerId = body.playerId as string;
       const roomCode = ((body.roomCode as string) || '').trim().toUpperCase();
 
-      const room = await redisMultiplayer.getRoom(roomCode);
-      const match = await redisMultiplayer.getMatch(roomCode);
+      const [room, match] = await Promise.all([
+        redisMultiplayer.getRoom(roomCode),
+        redisMultiplayer.getMatch(roomCode),
+      ]);
 
       if (!room || !match) {
         sendJson(res, 404, { error: 'Active match not found.' });
@@ -861,8 +863,10 @@ export default async function handler(
 
       try {
         const result = LudoEngine.rollDice(match, seatIndex);
-        await redisMultiplayer.saveMatch(match.roomCode, match);
-        await redisMultiplayer.touchRoom(match.roomCode);
+        await Promise.all([
+          redisMultiplayer.saveMatch(match.roomCode, match),
+          redisMultiplayer.touchRoom(match.roomCode),
+        ]);
 
         const payload = {
           diceValue: result.diceValue,
@@ -893,8 +897,10 @@ export default async function handler(
       const roomCode = ((body.roomCode as string) || '').trim().toUpperCase();
       const tokenId = typeof body.tokenId === 'number' ? body.tokenId : parseInt(String(body.tokenId), 10);
 
-      const room = await redisMultiplayer.getRoom(roomCode);
-      const match = await redisMultiplayer.getMatch(roomCode);
+      const [room, match] = await Promise.all([
+        redisMultiplayer.getRoom(roomCode),
+        redisMultiplayer.getMatch(roomCode),
+      ]);
 
       if (!room || !match) {
         sendJson(res, 404, { error: 'Active match not found.' });
@@ -909,8 +915,10 @@ export default async function handler(
 
       try {
         const result = LudoEngine.moveToken(match, seatIndex, tokenId);
-        await redisMultiplayer.saveMatch(match.roomCode, match);
-        await redisMultiplayer.touchRoom(match.roomCode);
+        await Promise.all([
+          redisMultiplayer.saveMatch(match.roomCode, match),
+          redisMultiplayer.touchRoom(match.roomCode),
+        ]);
 
         const payload = {
           tokenId,
@@ -975,27 +983,26 @@ export default async function handler(
       const since = parseInt((query.since || body.since || '0') as string, 10);
       const playerId = (query.playerId || body.playerId || '') as string;
 
-      let events: VercelMultiplayerEvent[] = [];
-      let lastEventId = since;
+      // Parallelize fetching room events and player inbox in a single network round-trip
+      const [eventsRaw, inboxRaw] = await Promise.all([
+        roomCode ? redisMultiplayer.getRoomEventsSince(roomCode, since) : Promise.resolve([]),
+        playerId ? redisMultiplayer.getPlayerInbox(playerId, true) : Promise.resolve([]),
+      ]);
 
-      if (roomCode) {
-        const room = await redisMultiplayer.getRoom(roomCode);
-        if (room && room.status === 'IN_MATCH') {
-          const match = await redisMultiplayer.getMatch(roomCode);
-          if (match && match.players[match.activePlayerIndex]?.isBot) {
-            await stepBotTurnsIfNeeded(roomCode);
-          }
-        }
-        events = (await redisMultiplayer.getRoomEventsSince(roomCode, since)) as VercelMultiplayerEvent[];
-        if (events.length > 0) {
-          lastEventId = events[events.length - 1].id;
-        }
+      const events = eventsRaw as VercelMultiplayerEvent[];
+      const inbox = inboxRaw as Array<{ id: number; type: string; data: unknown }>;
+      let lastEventId = since;
+      if (events.length > 0) {
+        lastEventId = events[events.length - 1].id;
       }
 
-      // Check player-specific inbox (invites, direct friend notifications)
-      let inbox: Array<{ id: number; type: string; data: unknown }> = [];
-      if (playerId) {
-        inbox = (await redisMultiplayer.getPlayerInbox(playerId, true)) as Array<{ id: number; type: string; data: unknown }>;
+      // If the latest event indicates the active player is a bot, step the bot turn
+      if (roomCode) {
+        const lastEv = events.length > 0 ? events[events.length - 1] : null;
+        const lastMatch = (lastEv?.data as any)?.match as OnlineMatchState | undefined;
+        if (lastMatch && lastMatch.players[lastMatch.activePlayerIndex]?.isBot) {
+          await stepBotTurnsIfNeeded(roomCode);
+        }
       }
 
       sendJson(res, 200, {
